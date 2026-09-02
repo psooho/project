@@ -54,6 +54,9 @@ RIGHT_EYE_IDX = _unique_indices(FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_EY
 LEFT_EYEBROW_IDX = _unique_indices(FaceLandmarksConnections.FACE_LANDMARKS_LEFT_EYEBROW)
 RIGHT_EYEBROW_IDX = _unique_indices(FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_EYEBROW)
 EYEBROW_IDX = LEFT_EYEBROW_IDX + RIGHT_EYEBROW_IDX
+NOSE_IDX = _unique_indices(FaceLandmarksConnections.FACE_LANDMARKS_NOSE)
+LIPS_IDX = _unique_indices(FaceLandmarksConnections.FACE_LANDMARKS_LIPS)
+EYES_IDX = LEFT_EYE_IDX + RIGHT_EYE_IDX
 
 
 def detect_landmarks(image_rgb: np.ndarray) -> np.ndarray | None:

@@ -46,7 +46,12 @@ BROW_EXPOSURE_PADDING_PX = -4
 # 블러 강도 — 값이 클수록 더 강하게 흐려진다. 최대한 강하게 요청받아 크게 잡았다.
 MOSAIC_BLUR_KERNEL_RATIO = 0.35
 # 블러 영역 경계를 얼마나 부드럽게 퍼뜨릴지 — 값이 클수록 그라데이션 폭이 넓어진다.
-MOSAIC_FEATHER_RATIO = 0.025
+MOSAIC_FEATHER_RATIO = 0.04
+# 얼굴 윤곽(FACE_OVAL) 폴리곤을 이만큼 살짝 팽창시킨다. 눈·코 모양을 따로 쫓지 않고
+# 눈썹 아래로 얼굴 윤곽(=헤어라인 안쪽) 전체를 그대로 가리는 단순한 방식이라, 작은
+# 안전 여유 정도면 충분하다 (구레나룻·헤어라인 침범 방지를 위해 작게 유지).
+MOSAIC_DILATE_RATIO_X = 0.015
+MOSAIC_DILATE_RATIO_Y = 0.02
 
 # 회전 보정이 이 각도를 넘으면 정렬 신뢰도가 낮다고 보고 경고만 남긴다 (PRD 6.2).
 MAX_TRUSTED_ROTATION_DEG = 45.0
@@ -254,14 +259,27 @@ def _blur(image: np.ndarray, kernel_ratio: float) -> np.ndarray:
     return cv2.GaussianBlur(image, (kernel, kernel), 0)
 
 
-def _apply_face_mosaic(image: np.ndarray, points: np.ndarray) -> np.ndarray:
-    face_mask = _face_oval_mask(image.shape[:2], points)
+def _build_mosaic_mask(image_shape: tuple[int, int], points: np.ndarray) -> np.ndarray:
+    """눈·코 모양을 따로 쫓지 않고, 눈썹 아래로 얼굴 윤곽(FACE_OVAL, = 헤어라인 안쪽)
+    전체를 그대로 모자이크 대상으로 삼는다. 윤곽 밖(헤어라인·배경·구레나룻)은
+    건드리지 않는다."""
+    face_mask = _face_oval_mask(image_shape, points)
+
+    # 얼굴 윤곽 폴리곤을 살짝 팽창시킨다. 세로를 가로보다 조금 더 넉넉히 잡는다.
+    kernel_w = _odd_kernel_size(face_mask.shape, MOSAIC_DILATE_RATIO_X)
+    kernel_h = _odd_kernel_size(face_mask.shape, MOSAIC_DILATE_RATIO_Y)
+    face_mask = cv2.dilate(face_mask, np.ones((kernel_h, kernel_w), np.uint8))
 
     brow_bottom_y = int(points[EYEBROW_IDX][:, 1].max() + BROW_EXPOSURE_PADDING_PX)
-    brow_bottom_y = max(0, min(brow_bottom_y, image.shape[0]))
+    brow_bottom_y = max(0, min(brow_bottom_y, image_shape[0]))
 
     mosaic_mask = face_mask.copy()
     mosaic_mask[:brow_bottom_y, :] = 0  # 눈썹 위(이마·헤어라인)는 모자이크 대상에서 제외
+    return mosaic_mask
+
+
+def _apply_face_mosaic(image: np.ndarray, points: np.ndarray) -> np.ndarray:
+    mosaic_mask = _build_mosaic_mask(image.shape[:2], points)
 
     # 마스크 자체를 블러 처리해서 0~255 사이의 부드러운 경계(그라데이션)로 만든 뒤,
     # 그 값을 알파값 삼아 원본과 블러 이미지를 섞는다 — 마스크를 그대로 써서
