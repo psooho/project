@@ -34,7 +34,7 @@ CROP_ANCHOR = ((TARGET_LEFT_BROW[0] + TARGET_RIGHT_BROW[0]) / 2, TARGET_LEFT_BRO
 # 넓게 나오는 경향이 있어, 그쪽만 살짝 더 줄인다. 앵커에서 더 멀리 뻗어나간 쪽의 얼굴
 # 윤곽(FACE_OVAL) 랜드마크가 있는 방향을 "앞쪽"으로 본다 — 코·턱은 옆으로도 튀어나와
 # 있지만, 반대쪽(귀 방향)은 윤곽 랜드마크 자체가 관자놀이 부근에서 끝나기 때문이다.
-FRONT_MARGIN_TRIM_RATIO = 0.8
+FRONT_MARGIN_TRIM_RATIO = 0.65
 
 # 눈썹 아래로 이 픽셀만큼 여유를 두고 그 아래(눈·코·입·볼·턱)만 모자이크한다.
 # 눈썹 위쪽(이마~헤어라인)은 그대로 노출된다 (PRD 6.5).
