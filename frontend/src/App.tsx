@@ -7,6 +7,7 @@ type Status = "idle" | "processing" | "done";
 interface Results {
   before: Blob;
   after: Blob;
+  warnings: string[];
 }
 
 const API_BASE_URL = "http://localhost:8000";
@@ -21,12 +22,12 @@ async function processPair(before: File, after: File): Promise<Results> {
   const res = await fetch(`${API_BASE_URL}/api/process`, { method: "POST", body: formData });
   if (!res.ok) throw new Error("서버 처리에 실패했습니다.");
 
-  const data: { before: string; after: string } = await res.json();
+  const data: { before: string; after: string; warnings?: string[] } = await res.json();
   const [beforeBlob, afterBlob] = await Promise.all([
     fetch(data.before).then((r) => r.blob()),
     fetch(data.after).then((r) => r.blob()),
   ]);
-  return { before: beforeBlob, after: afterBlob };
+  return { before: beforeBlob, after: afterBlob, warnings: data.warnings ?? [] };
 }
 
 function withJpgName(originalName: string, prefix: string) {
@@ -50,19 +51,29 @@ function App() {
   const [afterPhoto, setAfterPhoto] = useState<File | null>(null);
   const [status, setStatus] = useState<Status>("idle");
   const [results, setResults] = useState<Results | null>(null);
+  const [resultUrls, setResultUrls] = useState<{ before: string; after: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  function resetResults() {
+    if (resultUrls) {
+      URL.revokeObjectURL(resultUrls.before);
+      URL.revokeObjectURL(resultUrls.after);
+    }
+    setResultUrls(null);
+    setResults(null);
+  }
 
   function handleBeforeChange(file: File | null) {
     setBeforePhoto(file);
     setStatus("idle");
-    setResults(null);
+    resetResults();
     setError(null);
   }
 
   function handleAfterChange(file: File | null) {
     setAfterPhoto(file);
     setStatus("idle");
-    setResults(null);
+    resetResults();
     setError(null);
   }
 
@@ -73,6 +84,10 @@ function App() {
     try {
       const processed = await processPair(beforePhoto, afterPhoto);
       setResults(processed);
+      setResultUrls({
+        before: URL.createObjectURL(processed.before),
+        after: URL.createObjectURL(processed.after),
+      });
       setStatus("done");
     } catch {
       setError("변환 중 문제가 발생했습니다. 다시 시도해주세요.");
@@ -96,9 +111,27 @@ function App() {
       </header>
 
       <section className="photo-grid">
-        <PhotoDropzone label="전 (Before)" file={beforePhoto} onChange={handleBeforeChange} />
-        <PhotoDropzone label="후 (After)" file={afterPhoto} onChange={handleAfterChange} />
+        <PhotoDropzone
+          label="전 (Before)"
+          file={beforePhoto}
+          onChange={handleBeforeChange}
+          resultUrl={resultUrls?.before}
+        />
+        <PhotoDropzone
+          label="후 (After)"
+          file={afterPhoto}
+          onChange={handleAfterChange}
+          resultUrl={resultUrls?.after}
+        />
       </section>
+
+      {results && results.warnings.length > 0 && (
+        <div className="warning-banner">
+          {results.warnings.map((warning) => (
+            <p key={warning}>⚠ {warning}</p>
+          ))}
+        </div>
+      )}
 
       <div className="actions">
         {status === "done" ? (

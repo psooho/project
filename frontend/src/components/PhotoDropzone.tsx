@@ -7,6 +7,8 @@ interface PhotoDropzoneProps {
   label: string;
   file: File | null;
   onChange: (file: File | null) => void;
+  /** 변환이 끝난 결과 미리보기 URL. 있으면 원본 대신 이걸 보여준다. */
+  resultUrl?: string | null;
 }
 
 function isAcceptedFile(file: File) {
@@ -14,12 +16,12 @@ function isAcceptedFile(file: File) {
   return /\.(jpe?g|png|heic|heif)$/i.test(file.name);
 }
 
-export function PhotoDropzone({ label, file, onChange }: PhotoDropzoneProps) {
+export function PhotoDropzone({ label, file, onChange, resultUrl }: PhotoDropzoneProps) {
   const [isDragOver, setIsDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const previewUrl = file ? URL.createObjectURL(file) : null;
+  const previewUrl = resultUrl ?? (file ? URL.createObjectURL(file) : null);
 
   function handleFiles(files: FileList | null) {
     const picked = files?.[0];
@@ -56,6 +58,7 @@ export function PhotoDropzone({ label, file, onChange }: PhotoDropzoneProps) {
         {previewUrl ? (
           <>
             <img src={previewUrl} alt={`${label} 미리보기`} className="dropzone-preview" />
+            {resultUrl && <span className="dropzone-badge">변환 결과</span>}
             <button
               type="button"
               className="dropzone-remove"
