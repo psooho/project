@@ -32,12 +32,12 @@ CROP_ANCHOR = ((TARGET_LEFT_BROW[0] + TARGET_RIGHT_BROW[0]) / 2, TARGET_LEFT_BRO
 
 # 측면 사진에서 "얼굴 앞쪽"(코·턱이 있는 방향) 여백이 "뒤쪽"(귀 방향)보다 필요 이상으로
 # 넓게 나오는 경향이 있어, 그쪽만 줄이고 반대쪽(귀 뒤쪽)은 오히려 조금 더 넓힌다.
-# 앵커에서 더 멀리 뻗어나간 쪽의 얼굴 윤곽(FACE_OVAL) 랜드마크가 있는 방향을 "앞쪽"으로
-# 본다 — 코·턱은 옆으로도 튀어나와 있지만, 반대쪽(귀 방향)은 윤곽 랜드마크 자체가
-# 관자놀이 부근에서 끝나기 때문이다. 뒤쪽을 넓히는 건 패딩 없는 크롭 범위를 넘어설 수
-# 있어(흰 여백이 살짝 보일 수 있음), 필요하다고 확인된 만큼만 적용한다.
+# 뒤쪽을 넓히는 건 패딩 없는 크롭 범위를 넘어설 수 있어(흰 여백이 살짝 보일 수 있음),
+# 필요하다고 확인된 만큼만 적용한다. 정면 사진처럼 좌우가 비슷하면 이 보정 자체를
+# 건너뛴다 (자세한 조건은 _adjust_side_margins 참고).
 FRONT_MARGIN_TRIM_RATIO = 0.5
 BACK_MARGIN_EXTEND_RATIO = 0.93
+SIDE_ASYMMETRY_THRESHOLD = 0.2
 
 # 눈썹 아래로 이 픽셀만큼 여유를 두고 그 아래(눈·코·입·볼·턱)만 모자이크한다.
 # 눈썹 위쪽(이마~헤어라인)은 그대로 노출된다 (PRD 6.5).
@@ -163,16 +163,25 @@ def _adjust_side_margins(
     back_extend_ratio: float,
     canvas_width: int,
 ) -> tuple[int, int, int, int]:
-    """앵커에서 얼굴 윤곽(FACE_OVAL) 랜드마크가 덜 뻗어나간 쪽을 "얼굴 앞쪽"으로 보고,
-    그쪽 여백은 front_trim_ratio만큼 줄이고 반대쪽(귀 뒤쪽)은 back_extend_ratio만큼
-    넓힌다. 뒤쪽을 넓히는 건 캔버스의 흰 여백 영역까지 쓸 수 있어 안전하게 슬라이스된다.
+    """측면 사진처럼 얼굴 윤곽(FACE_OVAL)이 좌우로 뚜렷하게 비대칭일 때만 적용한다.
+    앵커에서 덜 뻗어나간 쪽을 "얼굴 앞쪽"으로 보고, 그쪽 여백은 front_trim_ratio만큼
+    줄이고 반대쪽(귀 뒤쪽)은 back_extend_ratio만큼 넓힌다. 뒤쪽을 넓히는 건 캔버스의
+    흰 여백 영역까지 쓸 수 있어 안전하게 슬라이스된다.
     (처음엔 "더 멀리 뻗은 쪽 = 앞쪽"으로 가정했는데 실제로는 반대였다 — 옆모습에서는
-    볼·턱 실루엣이 넓게 퍼지는 귀 쪽 윤곽이 코 쪽보다 오히려 더 멀리 뻗는다.)"""
+    볼·턱 실루엣이 넓게 퍼지는 귀 쪽 윤곽이 코 쪽보다 오히려 더 멀리 뻗는다.)
+
+    정면 사진은 좌우 윤곽이 거의 대칭이라, 아주 작은 차이만으로 한쪽을 "앞쪽"으로
+    판정해버리면 오히려 없던 비대칭을 만들어낸다. ASYMMETRY_THRESHOLD 이상 차이날
+    때만 보정하고, 정면처럼 비슷하면 좌우를 그대로 둔다."""
     ax = anchor_x
     left_reach = max(ax - points[FACE_OVAL_RING][:, 0].min() for points in points_list)
     right_reach = max(points[FACE_OVAL_RING][:, 0].max() - ax for points in points_list)
 
     left, top, right, bottom = box
+    longer, shorter = max(left_reach, right_reach), min(left_reach, right_reach)
+    if longer == 0 or (longer - shorter) / longer < SIDE_ASYMMETRY_THRESHOLD:
+        return box
+
     if left_reach <= right_reach:
         left = int(ax - (ax - left) * front_trim_ratio)
         right = min(canvas_width, int(ax + (right - ax) * back_extend_ratio))
