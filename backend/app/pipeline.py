@@ -15,13 +15,18 @@ from .landmarks import (
 # 전/후 사진의 각도(회전)와 크기(스케일)를 동시에 정규화한다 (PRD 6.2, 6.3).
 # 눈이 아니라 눈썹을 기준으로 삼은 이유: 모발이식 병원에서는 눈썹이 헤어라인과 함께
 # 핵심적으로 노출·비교되는 부위라, 눈썹 자체가 수평이 되는 게 더 중요하다.
-# 위쪽 여백을 넉넉히 둬서(눈썹 기준 위로 CANVAS_HEIGHT의 절반 이상) 헤어라인이
-# 캔버스 밖으로 잘려나가지 않게 한다.
-CANVAS_WIDTH = 900
-CANVAS_HEIGHT = 1300
-TARGET_LEFT_BROW = np.array([370.0, 550.0], dtype=np.float32)
-TARGET_RIGHT_BROW = np.array([530.0, 550.0], dtype=np.float32)
+# 측면 사진은 두 눈썹 사이의 화면상 거리가 정면보다 훨씬 짧게 찍혀서, 같은 거리로
+# 맞추려다 보면 확대(줌인) 배율이 정면보다 훨씬 커진다. 그만큼 위쪽 여백을 크게
+# 잡아둬야 확대된 헤어라인도 캔버스 밖으로 밀려나지 않는다.
+CANVAS_WIDTH = 1000
+CANVAS_HEIGHT = 1700
+TARGET_LEFT_BROW = np.array([420.0, 750.0], dtype=np.float32)
+TARGET_RIGHT_BROW = np.array([580.0, 750.0], dtype=np.float32)
 CROP_ANCHOR = ((TARGET_LEFT_BROW[0] + TARGET_RIGHT_BROW[0]) / 2, TARGET_LEFT_BROW[1])
+
+# 패딩 제거 크롭이 이 배율보다 더 타이트하게는 자르지 않는다 — 흰 여백이 약간
+# 남더라도, 헤어라인처럼 중요한 내용을 지나치게 잘라내는 것보다는 낫다.
+MIN_CROP_SCALE = 0.6
 
 # 눈썹 아래로 이 픽셀만큼 여유를 두고 그 아래(눈·코·입·볼·턱)만 모자이크한다.
 # 눈썹 위쪽(이마~헤어라인)은 그대로 노출된다 (PRD 6.5).
@@ -226,9 +231,12 @@ def process_pair(before_bgr: np.ndarray, after_bgr: np.ndarray) -> tuple[np.ndar
 
     # 회전으로 생긴 흰 패딩 쐐기가 안 보이도록, 두 사진 다 패딩이 전혀 없는 영역까지만
     # 남기고 잘라낸다. 둘 중 더 많이 잘라야 하는 쪽에 맞춰야 두 결과의 배율이 같아진다.
-    crop_scale = min(
-        _max_valid_crop_scale(before_valid_mask, CROP_ANCHOR),
-        _max_valid_crop_scale(after_valid_mask, CROP_ANCHOR),
+    crop_scale = max(
+        MIN_CROP_SCALE,
+        min(
+            _max_valid_crop_scale(before_valid_mask, CROP_ANCHOR),
+            _max_valid_crop_scale(after_valid_mask, CROP_ANCHOR),
+        ),
     )
     aligned_before, before_canonical_points = _crop_to_scale(
         aligned_before, before_canonical_points, crop_scale, CROP_ANCHOR
