@@ -12,6 +12,7 @@ from .landmarks import (
     EYES_IDX,
     FACE_OVAL_RING,
     LEFT_EYEBROW_IDX,
+    LIPS_IDX,
     NOSE_IDX,
     RIGHT_EYEBROW_IDX,
     detect_landmarks,
@@ -296,9 +297,12 @@ def _build_mosaic_mask(image_shape: tuple[int, int], points: np.ndarray) -> np.n
     mosaic_mask[:brow_bottom_y, :] = 0  # 눈썹 위(이마·헤어라인)는 모자이크 대상에서 제외
 
     # 윤곽을 옆으로 당긴 만큼 눈·코가 덜 덮일 수 있으니, 각자의 랜드마크로 직접 보강한다.
-    for indices in (EYES_IDX, NOSE_IDX):
-        feature_mask = _feature_hull_mask(image_shape, points, indices, MOSAIC_FEATURE_DILATE_RATIO)
-        mosaic_mask = np.maximum(mosaic_mask, feature_mask)
+    # 눈과 코를 따로 껍질을 씌우면 그 사이(볼)가 섬처럼 비므로, 눈·코·입을 한 덩어리로
+    # 묶어 하나의 볼록 껍질을 씌운다 — 사이가 통째로 채워진다.
+    feature_mask = _feature_hull_mask(
+        image_shape, points, EYES_IDX + NOSE_IDX + LIPS_IDX, MOSAIC_FEATURE_DILATE_RATIO
+    )
+    mosaic_mask = np.maximum(mosaic_mask, feature_mask)
 
     # 눈·코 마스크가 얼굴 마스크와 떨어져 섬처럼 남으면 블러가 끊겨 보인다.
     # 닫기(close)로 그 사이 틈을 메워 하나로 이어준다.
