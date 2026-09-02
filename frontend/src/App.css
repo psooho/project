@@ -177,6 +177,18 @@
   cursor: not-allowed;
 }
 
+.submit-btn--secondary {
+  background: #fff;
+  color: #111827;
+  border: 1px solid #d1d5db;
+}
+
+.submit-btn--secondary:disabled {
+  background: #f3f4f6;
+  color: #9ca3af;
+  border-color: #e5e7eb;
+}
+
 .error-note {
   color: #dc2626;
   font-size: 0.85rem;

@@ -261,7 +261,9 @@ def _apply_face_mosaic(image: np.ndarray, points: np.ndarray) -> np.ndarray:
     return result
 
 
-def process_pair(before_bgr: np.ndarray, after_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray, list[str]]:
+def process_pair(
+    before_bgr: np.ndarray, after_bgr: np.ndarray, apply_mosaic: bool = False
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
     warnings: list[str] = []
 
     before_points = detect_landmarks(cv2.cvtColor(before_bgr, cv2.COLOR_BGR2RGB))
@@ -310,6 +312,8 @@ def process_pair(before_bgr: np.ndarray, after_bgr: np.ndarray) -> tuple[np.ndar
 
     matched_after = _match_color(aligned_before, before_canonical_points, aligned_after, after_canonical_points)
 
-    # TODO: 모자이크(PRD 6.5)는 정렬 결과를 먼저 확인하기 위해 잠시 비활성화했다.
-    # _apply_face_mosaic(image, points)를 다시 연결하면 된다.
+    if apply_mosaic:
+        aligned_before = _apply_face_mosaic(aligned_before, before_canonical_points)
+        matched_after = _apply_face_mosaic(matched_after, after_canonical_points)
+
     return aligned_before, matched_after, warnings

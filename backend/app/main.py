@@ -4,7 +4,7 @@ from io import BytesIO
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
@@ -45,11 +45,14 @@ def health() -> dict[str, str]:
 async def process(
     before: UploadFile = File(...),
     after: UploadFile = File(...),
+    mosaic: bool = Form(False),
 ) -> dict:
     before_bgr = _upload_to_bgr(await before.read())
     after_bgr = _upload_to_bgr(await after.read())
 
-    result_before, result_after, warnings = await run_in_threadpool(process_pair, before_bgr, after_bgr)
+    result_before, result_after, warnings = await run_in_threadpool(
+        process_pair, before_bgr, after_bgr, mosaic
+    )
 
     return {
         "before": _bgr_to_data_url(result_before),
