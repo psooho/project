@@ -37,7 +37,7 @@ CROP_ANCHOR = ((TARGET_LEFT_BROW[0] + TARGET_RIGHT_BROW[0]) / 2, TARGET_LEFT_BRO
 # 관자놀이 부근에서 끝나기 때문이다. 뒤쪽을 넓히는 건 패딩 없는 크롭 범위를 넘어설 수
 # 있어(흰 여백이 살짝 보일 수 있음), 필요하다고 확인된 만큼만 적용한다.
 FRONT_MARGIN_TRIM_RATIO = 0.5
-BACK_MARGIN_EXTEND_RATIO = 1.08
+BACK_MARGIN_EXTEND_RATIO = 1.03
 
 # 눈썹 아래로 이 픽셀만큼 여유를 두고 그 아래(눈·코·입·볼·턱)만 모자이크한다.
 # 눈썹 위쪽(이마~헤어라인)은 그대로 노출된다 (PRD 6.5).
