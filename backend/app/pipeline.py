@@ -62,6 +62,12 @@ MOSAIC_FEATURE_DILATE_RATIO = 0.06
 # 윤곽을 당기면서 눈·코 마스크와 얼굴 마스크 사이에 생기는 틈을 메우는 정도(닫기 연산).
 MOSAIC_CLOSE_RATIO = 0.05
 
+# 측면 사진에서 고개가 앞으로 숙여져 보이는 문제를 지각적으로 보정하는 각도.
+# 눈썹 중심선은 변환상 이미 정확히 수평이라, 숙여져 보이는 건 2D 회전으로는 없앨 수 없는
+# 고개 각도(pitch) 탓이다. 그래서 앞쪽(코 방향)을 이만큼 더 들어올려 상쇄한다.
+# 정면 사진은 이미 자연스러우므로 좌우가 뚜렷하게 비대칭일 때(측면)만 적용한다.
+FRONT_LIFT_DEG = 2.0
+
 # 회전 보정이 이 각도를 넘으면 정렬 신뢰도가 낮다고 보고 경고만 남긴다 (PRD 6.2).
 MAX_TRUSTED_ROTATION_DEG = 45.0
 
@@ -80,6 +86,37 @@ def _screen_ordered_brows(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return (brow_a, brow_b) if brow_a[0] <= brow_b[0] else (brow_b, brow_a)
 
 
+def _front_is_right(points: np.ndarray) -> bool | None:
+    """코가 향하는 쪽("앞쪽")이 화면 오른쪽인지 판정한다. 좌우가 비슷하면(정면) None.
+
+    옆모습에서는 볼·턱 실루엣이 넓게 퍼지는 귀 쪽 윤곽이 코 쪽보다 더 멀리 뻗으므로,
+    윤곽이 "덜" 뻗은 쪽이 앞(코) 방향이다 (_adjust_side_margins와 같은 기준)."""
+    brow_mid_x = float(points[EYEBROW_IDX][:, 0].mean())
+    oval_x = points[FACE_OVAL_RING][:, 0]
+    left_reach = brow_mid_x - float(oval_x.min())
+    right_reach = float(oval_x.max()) - brow_mid_x
+
+    longer, shorter = max(left_reach, right_reach), min(left_reach, right_reach)
+    if longer <= 0 or (longer - shorter) / longer < SIDE_ASYMMETRY_THRESHOLD:
+        return None
+    return right_reach < left_reach
+
+
+def _lift_front(transform: np.ndarray, points: np.ndarray) -> np.ndarray:
+    """앞쪽(코 방향)을 FRONT_LIFT_DEG만큼 들어올리도록 회전을 덧붙인다.
+    getRotationMatrix2D의 양수 각도는 화면상 반시계 방향이라 오른쪽이 올라간다."""
+    front_is_right = _front_is_right(points)
+    if front_is_right is None or FRONT_LIFT_DEG == 0:
+        return transform
+
+    center = (TARGET_LEFT_BROW + TARGET_RIGHT_BROW) / 2
+    angle = FRONT_LIFT_DEG if front_is_right else -FRONT_LIFT_DEG
+    rotation = cv2.getRotationMatrix2D((float(center[0]), float(center[1])), angle, 1.0)
+
+    stacked = np.vstack([rotation, [0, 0, 1]]) @ np.vstack([transform, [0, 0, 1]])
+    return stacked[:2].astype(np.float32)
+
+
 def _align_to_canonical(
     image_bgr: np.ndarray, points: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, str | None]:
@@ -88,6 +125,7 @@ def _align_to_canonical(
     dst = np.array([TARGET_LEFT_BROW, TARGET_RIGHT_BROW], dtype=np.float32)
 
     transform, _ = cv2.estimateAffinePartial2D(src, dst)
+    transform = _lift_front(transform, points)
 
     warning = None
     rotation_deg = float(np.degrees(np.arctan2(transform[1, 0], transform[0, 0])))
