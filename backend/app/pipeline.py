@@ -43,8 +43,8 @@ SIDE_ASYMMETRY_THRESHOLD = 0.2
 # 음수면 눈썹 하단을 살짝 파고든다(그만큼 눈썹 일부가 가려질 수 있음). 눈은 확실히
 # 가리되 눈썹은 온전히 남기는 게 목표라, 0에 가깝게 살짝만 파고드는 값으로 잡는다.
 BROW_EXPOSURE_PADDING_PX = -4
-# 블러 강도 — 값이 클수록 더 강하게 흐려진다.
-MOSAIC_BLUR_KERNEL_RATIO = 0.05
+# 블러 강도 — 값이 클수록 더 강하게 흐려진다. 최대한 강하게 요청받아 크게 잡았다.
+MOSAIC_BLUR_KERNEL_RATIO = 0.35
 
 # 회전 보정이 이 각도를 넘으면 정렬 신뢰도가 낮다고 보고 경고만 남긴다 (PRD 6.2).
 MAX_TRUSTED_ROTATION_DEG = 45.0
