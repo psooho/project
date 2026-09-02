@@ -31,10 +31,13 @@ TARGET_RIGHT_BROW = np.array([980.0, 750.0], dtype=np.float32)
 CROP_ANCHOR = ((TARGET_LEFT_BROW[0] + TARGET_RIGHT_BROW[0]) / 2, TARGET_LEFT_BROW[1])
 
 # 측면 사진에서 "얼굴 앞쪽"(코·턱이 있는 방향) 여백이 "뒤쪽"(귀 방향)보다 필요 이상으로
-# 넓게 나오는 경향이 있어, 그쪽만 살짝 더 줄인다. 앵커에서 더 멀리 뻗어나간 쪽의 얼굴
-# 윤곽(FACE_OVAL) 랜드마크가 있는 방향을 "앞쪽"으로 본다 — 코·턱은 옆으로도 튀어나와
-# 있지만, 반대쪽(귀 방향)은 윤곽 랜드마크 자체가 관자놀이 부근에서 끝나기 때문이다.
-FRONT_MARGIN_TRIM_RATIO = 0.65
+# 넓게 나오는 경향이 있어, 그쪽만 줄이고 반대쪽(귀 뒤쪽)은 오히려 조금 더 넓힌다.
+# 앵커에서 더 멀리 뻗어나간 쪽의 얼굴 윤곽(FACE_OVAL) 랜드마크가 있는 방향을 "앞쪽"으로
+# 본다 — 코·턱은 옆으로도 튀어나와 있지만, 반대쪽(귀 방향)은 윤곽 랜드마크 자체가
+# 관자놀이 부근에서 끝나기 때문이다. 뒤쪽을 넓히는 건 패딩 없는 크롭 범위를 넘어설 수
+# 있어(흰 여백이 살짝 보일 수 있음), 필요하다고 확인된 만큼만 적용한다.
+FRONT_MARGIN_TRIM_RATIO = 0.5
+BACK_MARGIN_EXTEND_RATIO = 1.25
 
 # 눈썹 아래로 이 픽셀만큼 여유를 두고 그 아래(눈·코·입·볼·턱)만 모자이크한다.
 # 눈썹 위쪽(이마~헤어라인)은 그대로 노출된다 (PRD 6.5).
@@ -152,23 +155,28 @@ def _max_valid_margins(valid_mask: np.ndarray, anchor: tuple[float, float]) -> t
     return box_at(scale)
 
 
-def _trim_front_margin(
+def _adjust_side_margins(
     box: tuple[int, int, int, int],
     points_list: list[np.ndarray],
     anchor_x: float,
-    trim_ratio: float,
+    front_trim_ratio: float,
+    back_extend_ratio: float,
+    canvas_width: int,
 ) -> tuple[int, int, int, int]:
     """앵커에서 얼굴 윤곽(FACE_OVAL) 랜드마크가 더 멀리 뻗어나간 쪽을 "얼굴 앞쪽"으로
-    보고, 그쪽 여백만 trim_ratio만큼 줄인다."""
+    보고, 그쪽 여백은 front_trim_ratio만큼 줄이고 반대쪽(귀 뒤쪽)은 back_extend_ratio만큼
+    넓힌다. 뒤쪽을 넓히는 건 캔버스의 흰 여백 영역까지 쓸 수 있어 안전하게 슬라이스된다."""
     ax = anchor_x
     left_reach = max(ax - points[FACE_OVAL_RING][:, 0].min() for points in points_list)
     right_reach = max(points[FACE_OVAL_RING][:, 0].max() - ax for points in points_list)
 
     left, top, right, bottom = box
     if left_reach >= right_reach:
-        left = int(ax - (ax - left) * trim_ratio)
+        left = int(ax - (ax - left) * front_trim_ratio)
+        right = min(canvas_width, int(ax + (right - ax) * back_extend_ratio))
     else:
-        right = int(ax + (right - ax) * trim_ratio)
+        right = int(ax + (right - ax) * front_trim_ratio)
+        left = max(0, int(ax - (ax - left) * back_extend_ratio))
     return left, top, right, bottom
 
 
@@ -277,8 +285,13 @@ def process_pair(before_bgr: np.ndarray, after_bgr: np.ndarray) -> tuple[np.ndar
         min(before_box[2], after_box[2]),
         min(before_box[3], after_box[3]),
     )
-    final_box = _trim_front_margin(
-        final_box, [before_canonical_points, after_canonical_points], CROP_ANCHOR[0], FRONT_MARGIN_TRIM_RATIO
+    final_box = _adjust_side_margins(
+        final_box,
+        [before_canonical_points, after_canonical_points],
+        CROP_ANCHOR[0],
+        FRONT_MARGIN_TRIM_RATIO,
+        BACK_MARGIN_EXTEND_RATIO,
+        CANVAS_WIDTH,
     )
     logger.info("crop: before=%s after=%s -> using=%s (canvas=%dx%d)", before_box, after_box, final_box, CANVAS_WIDTH, CANVAS_HEIGHT)
     aligned_before, before_canonical_points = _crop_to_box(aligned_before, before_canonical_points, final_box)
