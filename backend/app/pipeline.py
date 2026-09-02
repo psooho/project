@@ -49,13 +49,17 @@ BROW_EXPOSURE_PADDING_PX = -4
 MOSAIC_BLUR_KERNEL_RATIO = 0.35
 # 블러 영역 경계를 얼마나 부드럽게 퍼뜨릴지 — 값이 클수록 그라데이션 폭이 넓어진다.
 MOSAIC_FEATHER_RATIO = 0.04
-# 얼굴 윤곽(FACE_OVAL) 폴리곤은 팽창이 아니라 오히려 살짝 안쪽으로 줄인다(침식).
-# 모발이식 환자는 헤어라인이 후퇴해 있는 경우가 많아, FACE_OVAL이 실제보다 관자놀이
-# 쪽으로 넓게 잡히기 쉽다 — 그대로 쓰면 구레나룻·헤어라인이 가려진다.
-MOSAIC_OVAL_ERODE_RATIO = 0.19
-# 눈·코는 얼굴 윤곽에 기대지 않고 각자의 랜드마크로 직접 가린다 — 윤곽을 안쪽으로
-# 줄였으니 이 부위는 이걸로 확실히 보장한다. 여유는 작게(구레나룻 침범 방지).
+# 얼굴 윤곽(FACE_OVAL)을 "좌우로만" 안쪽으로 당기는 폭(반지름 비율). 모발이식 환자는
+# 헤어라인이 후퇴해 있는 경우가 많아 FACE_OVAL이 실제 헤어라인보다 관자놀이 쪽으로
+# 넓게 잡히고, 그대로 쓰면 구레나룻이 가려진다. 사방으로 균일하게 깎으면(예전 방식)
+# 구레나룻을 피하려 세게 깎을수록 턱·볼 커버리지까지 같이 사라지므로, 세로는 건드리지
+# 않고 가로로만 당긴다.
+MOSAIC_SIDE_TRIM_RATIO = 0.12
+# 눈·코는 얼굴 윤곽에 기대지 않고 각자의 랜드마크로 직접 가린다 — 윤곽을 옆으로
+# 당겼으니 이 부위는 이걸로 확실히 보장한다.
 MOSAIC_FEATURE_DILATE_RATIO = 0.06
+# 윤곽을 당기면서 눈·코 마스크와 얼굴 마스크 사이에 생기는 틈을 메우는 정도(닫기 연산).
+MOSAIC_CLOSE_RATIO = 0.05
 
 # 회전 보정이 이 각도를 넘으면 정렬 신뢰도가 낮다고 보고 경고만 남긴다 (PRD 6.2).
 MAX_TRUSTED_ROTATION_DEG = 45.0
@@ -275,14 +279,15 @@ def _feature_hull_mask(shape: tuple[int, int], points: np.ndarray, indices: list
 
 def _build_mosaic_mask(image_shape: tuple[int, int], points: np.ndarray) -> np.ndarray:
     """눈썹 아래로 얼굴 윤곽(FACE_OVAL, = 헤어라인 안쪽)을 기본 모자이크 영역으로 삼되,
-    윤곽을 살짝 안쪽으로 줄여서 구레나룻·후퇴한 헤어라인을 침범하지 않게 한다. 그 대신
-    눈·코는 얼굴 윤곽 정확도와 무관하게 각자의 랜드마크로 직접 확실히 가린다."""
+    윤곽을 좌우로만 안쪽으로 당겨서 구레나룻·후퇴한 헤어라인을 침범하지 않게 한다.
+    눈·코는 얼굴 윤곽 정확도와 무관하게 각자의 랜드마크로 직접 확실히 가리고, 마지막에
+    닫기 연산으로 얼굴 마스크와 이어붙여 빈틈이 남지 않게 한다."""
     face_mask = _face_oval_mask(image_shape, points)
 
-    # 모발이식 환자는 헤어라인이 후퇴해 있어 FACE_OVAL이 실제보다 관자놀이 쪽으로
-    # 넓게 잡히기 쉽다. 팽창 대신 침식시켜 구레나룻·헤어라인을 침범하지 않게 한다.
-    erode_kernel = _odd_kernel_size(face_mask.shape, MOSAIC_OVAL_ERODE_RATIO)
-    face_mask = cv2.erode(face_mask, np.ones((erode_kernel, erode_kernel), np.uint8))
+    # 좌우로만 당긴다. 사방으로 균일하게 깎으면 구레나룻을 피하려 세게 깎을수록
+    # 턱·볼 커버리지까지 같이 사라진다.
+    trim = max(1, int(min(image_shape) * MOSAIC_SIDE_TRIM_RATIO))
+    face_mask = cv2.erode(face_mask, np.ones((1, 2 * trim + 1), np.uint8))
 
     brow_bottom_y = int(points[EYEBROW_IDX][:, 1].max() + BROW_EXPOSURE_PADDING_PX)
     brow_bottom_y = max(0, min(brow_bottom_y, image_shape[0]))
@@ -290,12 +295,19 @@ def _build_mosaic_mask(image_shape: tuple[int, int], points: np.ndarray) -> np.n
     mosaic_mask = face_mask.copy()
     mosaic_mask[:brow_bottom_y, :] = 0  # 눈썹 위(이마·헤어라인)는 모자이크 대상에서 제외
 
-    # 윤곽을 안쪽으로 줄인 만큼 눈·코가 덜 덮일 수 있으니, 각자의 랜드마크로 직접 보강한다.
+    # 윤곽을 옆으로 당긴 만큼 눈·코가 덜 덮일 수 있으니, 각자의 랜드마크로 직접 보강한다.
     for indices in (EYES_IDX, NOSE_IDX):
         feature_mask = _feature_hull_mask(image_shape, points, indices, MOSAIC_FEATURE_DILATE_RATIO)
         mosaic_mask = np.maximum(mosaic_mask, feature_mask)
 
-    # 보강한 눈 마스크가 눈썹 경계선 위로 번지지 않도록 마지막에 한 번 더 제외시킨다.
+    # 눈·코 마스크가 얼굴 마스크와 떨어져 섬처럼 남으면 블러가 끊겨 보인다.
+    # 닫기(close)로 그 사이 틈을 메워 하나로 이어준다.
+    close_kernel = _odd_kernel_size(image_shape, MOSAIC_CLOSE_RATIO)
+    mosaic_mask = cv2.morphologyEx(
+        mosaic_mask, cv2.MORPH_CLOSE, np.ones((close_kernel, close_kernel), np.uint8)
+    )
+
+    # 보강·연결 과정에서 눈썹 경계선 위로 번지지 않도록 마지막에 한 번 더 제외시킨다.
     mosaic_mask[:brow_bottom_y, :] = 0
     return mosaic_mask
 
