@@ -2,3 +2,6 @@ fastapi
 uvicorn[standard]
 python-multipart
 pillow
+mediapipe
+opencv-python-headless
+numpy
