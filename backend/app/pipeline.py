@@ -163,15 +163,17 @@ def _adjust_side_margins(
     back_extend_ratio: float,
     canvas_width: int,
 ) -> tuple[int, int, int, int]:
-    """앵커에서 얼굴 윤곽(FACE_OVAL) 랜드마크가 더 멀리 뻗어나간 쪽을 "얼굴 앞쪽"으로
-    보고, 그쪽 여백은 front_trim_ratio만큼 줄이고 반대쪽(귀 뒤쪽)은 back_extend_ratio만큼
-    넓힌다. 뒤쪽을 넓히는 건 캔버스의 흰 여백 영역까지 쓸 수 있어 안전하게 슬라이스된다."""
+    """앵커에서 얼굴 윤곽(FACE_OVAL) 랜드마크가 덜 뻗어나간 쪽을 "얼굴 앞쪽"으로 보고,
+    그쪽 여백은 front_trim_ratio만큼 줄이고 반대쪽(귀 뒤쪽)은 back_extend_ratio만큼
+    넓힌다. 뒤쪽을 넓히는 건 캔버스의 흰 여백 영역까지 쓸 수 있어 안전하게 슬라이스된다.
+    (처음엔 "더 멀리 뻗은 쪽 = 앞쪽"으로 가정했는데 실제로는 반대였다 — 옆모습에서는
+    볼·턱 실루엣이 넓게 퍼지는 귀 쪽 윤곽이 코 쪽보다 오히려 더 멀리 뻗는다.)"""
     ax = anchor_x
     left_reach = max(ax - points[FACE_OVAL_RING][:, 0].min() for points in points_list)
     right_reach = max(points[FACE_OVAL_RING][:, 0].max() - ax for points in points_list)
 
     left, top, right, bottom = box
-    if left_reach >= right_reach:
+    if left_reach <= right_reach:
         left = int(ax - (ax - left) * front_trim_ratio)
         right = min(canvas_width, int(ax + (right - ax) * back_extend_ratio))
     else:
