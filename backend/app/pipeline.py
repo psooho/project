@@ -21,6 +21,7 @@ CANVAS_WIDTH = 900
 CANVAS_HEIGHT = 1300
 TARGET_LEFT_BROW = np.array([370.0, 550.0], dtype=np.float32)
 TARGET_RIGHT_BROW = np.array([530.0, 550.0], dtype=np.float32)
+CROP_ANCHOR = ((TARGET_LEFT_BROW[0] + TARGET_RIGHT_BROW[0]) / 2, TARGET_LEFT_BROW[1])
 
 # 눈썹 아래로 이 픽셀만큼 여유를 두고 그 아래(눈·코·입·볼·턱)만 모자이크한다.
 # 눈썹 위쪽(이마~헤어라인)은 그대로 노출된다 (PRD 6.5).
@@ -45,7 +46,9 @@ def _screen_ordered_brows(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return (brow_a, brow_b) if brow_a[0] <= brow_b[0] else (brow_b, brow_a)
 
 
-def _align_to_canonical(image_bgr: np.ndarray, points: np.ndarray) -> tuple[np.ndarray, np.ndarray, str | None]:
+def _align_to_canonical(
+    image_bgr: np.ndarray, points: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, str | None]:
     screen_left_brow, screen_right_brow = _screen_ordered_brows(points)
     src = np.array([screen_left_brow, screen_right_brow], dtype=np.float32)
     dst = np.array([TARGET_LEFT_BROW, TARGET_RIGHT_BROW], dtype=np.float32)
@@ -66,9 +69,74 @@ def _align_to_canonical(image_bgr: np.ndarray, points: np.ndarray) -> tuple[np.n
         borderValue=(255, 255, 255),
     )
 
+    # 회전 때문에 원본 사진이 캔버스 네 귀퉁이를 다 못 덮는 부분(흰 패딩 쐐기)을
+    # 나중에 크롭으로 잘라내기 위해, 원본이 실제로 덮는 영역을 마스크로 같이 만든다.
+    source_coverage = np.full(image_bgr.shape[:2], 255, dtype=np.uint8)
+    valid_mask = cv2.warpAffine(
+        source_coverage,
+        transform,
+        (CANVAS_WIDTH, CANVAS_HEIGHT),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+
     ones = np.ones((points.shape[0], 1), dtype=np.float32)
     aligned_points = np.hstack([points, ones]) @ transform.T
-    return aligned, aligned_points, warning
+    return aligned, aligned_points, valid_mask, warning
+
+
+def _max_valid_crop_scale(valid_mask: np.ndarray, anchor: tuple[float, float]) -> float:
+    """anchor(눈썹 중앙)를 기준으로 사방을 같은 비율로 줄여나가는 사각형 중,
+    흰 패딩을 전혀 포함하지 않는 가장 큰 배율(0~1)을 이분 탐색으로 찾는다."""
+    anchor_x, anchor_y = anchor
+    height, width = valid_mask.shape
+
+    def is_fully_valid(scale: float) -> bool:
+        left = max(0, int(round(anchor_x * (1 - scale))))
+        top = max(0, int(round(anchor_y * (1 - scale))))
+        right = min(width, int(round(anchor_x + scale * (width - anchor_x))))
+        bottom = min(height, int(round(anchor_y + scale * (height - anchor_y))))
+        if right <= left or bottom <= top:
+            return False
+        return bool(valid_mask[top:bottom, left:right].min() > 0)
+
+    if is_fully_valid(1.0):
+        return 1.0
+
+    low, high = 0.0, 1.0
+    for _ in range(20):
+        mid = (low + high) / 2
+        if is_fully_valid(mid):
+            low = mid
+        else:
+            high = mid
+    return low
+
+
+def _crop_to_scale(
+    image: np.ndarray, points: np.ndarray, scale: float, anchor: tuple[float, float]
+) -> tuple[np.ndarray, np.ndarray]:
+    """scale 배율만큼 anchor 기준으로 크롭한 뒤, 원래 캔버스 크기로 다시 늘린다.
+    가로세로를 같은 비율로 줄이므로 화면 비율은 그대로 유지되고, 결과적으로
+    회전 때문에 생긴 흰 패딩 쐐기 없이 반듯한 직사각형 테두리가 된다."""
+    anchor_x, anchor_y = anchor
+    height, width = image.shape[:2]
+
+    left = max(0, int(round(anchor_x * (1 - scale))))
+    top = max(0, int(round(anchor_y * (1 - scale))))
+    right = min(width, int(round(anchor_x + scale * (width - anchor_x))))
+    bottom = min(height, int(round(anchor_y + scale * (height - anchor_y))))
+
+    cropped = image[top:bottom, left:right]
+    resized = cv2.resize(cropped, (width, height), interpolation=cv2.INTER_LINEAR)
+
+    scale_x = width / max(1, right - left)
+    scale_y = height / max(1, bottom - top)
+    adjusted_points = points.copy()
+    adjusted_points[:, 0] = (points[:, 0] - left) * scale_x
+    adjusted_points[:, 1] = (points[:, 1] - top) * scale_y
+    return resized, adjusted_points
 
 
 def _face_oval_mask(shape: tuple[int, int], points: np.ndarray) -> np.ndarray:
@@ -145,12 +213,29 @@ def process_pair(before_bgr: np.ndarray, after_bgr: np.ndarray) -> tuple[np.ndar
     if before_points is None or after_points is None:
         return before_bgr, after_bgr, warnings
 
-    aligned_before, before_canonical_points, before_warning = _align_to_canonical(before_bgr, before_points)
-    aligned_after, after_canonical_points, after_warning = _align_to_canonical(after_bgr, after_points)
+    aligned_before, before_canonical_points, before_valid_mask, before_warning = _align_to_canonical(
+        before_bgr, before_points
+    )
+    aligned_after, after_canonical_points, after_valid_mask, after_warning = _align_to_canonical(
+        after_bgr, after_points
+    )
     if before_warning:
         warnings.append(f"전 사진: {before_warning}")
     if after_warning:
         warnings.append(f"후 사진: {after_warning}")
+
+    # 회전으로 생긴 흰 패딩 쐐기가 안 보이도록, 두 사진 다 패딩이 전혀 없는 영역까지만
+    # 남기고 잘라낸다. 둘 중 더 많이 잘라야 하는 쪽에 맞춰야 두 결과의 배율이 같아진다.
+    crop_scale = min(
+        _max_valid_crop_scale(before_valid_mask, CROP_ANCHOR),
+        _max_valid_crop_scale(after_valid_mask, CROP_ANCHOR),
+    )
+    aligned_before, before_canonical_points = _crop_to_scale(
+        aligned_before, before_canonical_points, crop_scale, CROP_ANCHOR
+    )
+    aligned_after, after_canonical_points = _crop_to_scale(
+        aligned_after, after_canonical_points, crop_scale, CROP_ANCHOR
+    )
 
     matched_after = _match_color(aligned_before, before_canonical_points, aligned_after, after_canonical_points)
 
