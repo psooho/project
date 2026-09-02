@@ -9,32 +9,24 @@ interface Results {
   after: Blob;
 }
 
-function loadImage(file: File): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = URL.createObjectURL(file);
-  });
-}
+const API_BASE_URL = "http://localhost:8000";
 
-// TODO: 이 파이프라인에 얼굴 랜드마크 기반 정렬(각도·크기), 밝기/색감 보정, 헤어라인·눈썹만
-// 남기는 모자이크 처리를 추가한다 (PRD 6.2~6.5). 지금은 원본을 그대로 캔버스에 그려 내보낸다.
-async function processPhoto(file: File): Promise<Blob> {
-  const img = await loadImage(file);
-  const canvas = document.createElement("canvas");
-  canvas.width = img.naturalWidth;
-  canvas.height = img.naturalHeight;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("캔버스를 생성할 수 없습니다.");
-  ctx.drawImage(img, 0, 0);
-  return new Promise((resolve, reject) => {
-    canvas.toBlob(
-      (blob) => (blob ? resolve(blob) : reject(new Error("이미지 변환에 실패했습니다."))),
-      "image/jpeg",
-      0.92,
-    );
-  });
+// 실제 정렬(각도·크기)/밝기·색감 보정/헤어라인·눈썹만 남기는 모자이크 처리는
+// 백엔드 파이프라인(backend/app/main.py의 process_pair, PRD 6.2~6.5)에서 이뤄진다.
+async function processPair(before: File, after: File): Promise<Results> {
+  const formData = new FormData();
+  formData.append("before", before);
+  formData.append("after", after);
+
+  const res = await fetch(`${API_BASE_URL}/api/process`, { method: "POST", body: formData });
+  if (!res.ok) throw new Error("서버 처리에 실패했습니다.");
+
+  const data: { before: string; after: string } = await res.json();
+  const [beforeBlob, afterBlob] = await Promise.all([
+    fetch(data.before).then((r) => r.blob()),
+    fetch(data.after).then((r) => r.blob()),
+  ]);
+  return { before: beforeBlob, after: afterBlob };
 }
 
 function withJpgName(originalName: string, prefix: string) {
@@ -79,8 +71,8 @@ function App() {
     setStatus("processing");
     setError(null);
     try {
-      const [before, after] = await Promise.all([processPhoto(beforePhoto), processPhoto(afterPhoto)]);
-      setResults({ before, after });
+      const processed = await processPair(beforePhoto, afterPhoto);
+      setResults(processed);
       setStatus("done");
     } catch {
       setError("변환 중 문제가 발생했습니다. 다시 시도해주세요.");
