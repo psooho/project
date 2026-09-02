@@ -1,4 +1,5 @@
 import base64
+import logging
 from io import BytesIO
 
 import cv2
@@ -9,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
 from .pipeline import process_pair
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 app = FastAPI(title="전후사진 변환 API")
 

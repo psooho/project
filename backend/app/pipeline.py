@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 import cv2
 import numpy as np
+
+logger = logging.getLogger("pipeline")
 
 from .landmarks import (
     EYEBROW_IDX,
@@ -60,6 +64,11 @@ def _align_to_canonical(
 
     warning = None
     rotation_deg = float(np.degrees(np.arctan2(transform[1, 0], transform[0, 0])))
+    zoom_scale = float(np.hypot(transform[0, 0], transform[1, 0]))
+    source_interbrow_px = float(np.linalg.norm(screen_right_brow - screen_left_brow))
+    logger.info(
+        "align: interbrow=%.1fpx rotation=%.1fdeg zoom=%.2fx", source_interbrow_px, rotation_deg, zoom_scale
+    )
     if abs(rotation_deg) > MAX_TRUSTED_ROTATION_DEG:
         warning = "얼굴 각도가 너무 기울어져 있어 정렬 결과의 신뢰도가 낮을 수 있습니다."
 
@@ -89,57 +98,61 @@ def _align_to_canonical(
     return aligned, aligned_points, valid_mask, warning
 
 
-def _max_valid_crop_scale(valid_mask: np.ndarray, anchor: tuple[float, float]) -> float:
-    """anchor(눈썹 중앙)를 기준으로 사방을 같은 비율로 줄여나가는 사각형 중,
-    흰 패딩을 전혀 포함하지 않는 가장 큰 배율(0~1)을 이분 탐색으로 찾는다."""
+def _max_valid_margins(valid_mask: np.ndarray, anchor: tuple[float, float]) -> tuple[int, int, int, int]:
+    """anchor(눈썹 중앙)를 포함하면서 흰 패딩을 전혀 포함하지 않는 사각형
+    (left, top, right, bottom)을 구한다.
+
+    독립적으로 4변을 순서대로 넓혀나가는 좌표하강 방식은 진동하면서 얇은 조각으로
+    수렴해버리는 문제가 있었다 (가로를 넓히면 세로가 좁아지고, 그 좁아진 세로 때문에
+    다시 가로가 과하게 넓어지는 식). 대신 두 단계로 나눈다:
+    1) anchor를 지나는 얇은 십자선으로 네 방향의 실제 여유 "비율(형태)"을 먼저 잰다.
+    2) 그 형태(가로세로 비율)는 유지한 채, 사각형 네 모서리가 전부 유효해질 때까지
+       하나의 배율로만 균일하게 줄인다. 방향별 형태가 이미 실제 여유를 반영하고
+       있어서, 예전(캔버스 중심 대칭 가정) 방식과 달리 세로가 좁다고 가로까지
+       똑같이 좁아지지 않는다."""
     anchor_x, anchor_y = anchor
     height, width = valid_mask.shape
+    ax, ay = int(round(anchor_x)), int(round(anchor_y))
 
-    def is_fully_valid(scale: float) -> bool:
-        left = max(0, int(round(anchor_x * (1 - scale))))
-        top = max(0, int(round(anchor_y * (1 - scale))))
-        right = min(width, int(round(anchor_x + scale * (width - anchor_x))))
-        bottom = min(height, int(round(anchor_y + scale * (height - anchor_y))))
-        if right <= left or bottom <= top:
+    def region_valid(l: int, t: int, r: int, b: int) -> bool:
+        if r <= l or b <= t:
             return False
-        return bool(valid_mask[top:bottom, left:right].min() > 0)
+        return bool(valid_mask[t:b, l:r].min() > 0)
 
-    if is_fully_valid(1.0):
-        return 1.0
+    def search(max_dist: float, test) -> float:
+        lo, hi = 0.0, max_dist
+        for _ in range(15):
+            mid = (lo + hi) / 2
+            if test(mid):
+                lo = mid
+            else:
+                hi = mid
+        return lo
 
-    low, high = 0.0, 1.0
-    for _ in range(20):
-        mid = (low + high) / 2
-        if is_fully_valid(mid):
-            low = mid
-        else:
-            high = mid
-    return low
+    raw_left = search(anchor_x, lambda d: region_valid(int(ax - d), ay, ax + 1, ay + 1))
+    raw_right = search(width - anchor_x, lambda d: region_valid(ax, ay, int(ax + d), ay + 1))
+    raw_top = search(anchor_y, lambda d: region_valid(ax, int(ay - d), ax + 1, ay))
+    raw_bottom = search(height - anchor_y, lambda d: region_valid(ax, ay, ax + 1, int(ay + d)))
+
+    def box_at(t: float) -> tuple[int, int, int, int]:
+        return (
+            int(ax - raw_left * t),
+            int(ay - raw_top * t),
+            int(ax + raw_right * t),
+            int(ay + raw_bottom * t),
+        )
+
+    scale = 1.0 if region_valid(*box_at(1.0)) else search(1.0, lambda t: region_valid(*box_at(t)))
+    return box_at(scale)
 
 
-def _crop_to_scale(
-    image: np.ndarray, points: np.ndarray, scale: float, anchor: tuple[float, float]
-) -> tuple[np.ndarray, np.ndarray]:
-    """scale 배율만큼 anchor 기준으로 크롭한 뒤, 원래 캔버스 크기로 다시 늘린다.
-    가로세로를 같은 비율로 줄이므로 화면 비율은 그대로 유지되고, 결과적으로
-    회전 때문에 생긴 흰 패딩 쐐기 없이 반듯한 직사각형 테두리가 된다."""
-    anchor_x, anchor_y = anchor
-    height, width = image.shape[:2]
-
-    left = max(0, int(round(anchor_x * (1 - scale))))
-    top = max(0, int(round(anchor_y * (1 - scale))))
-    right = min(width, int(round(anchor_x + scale * (width - anchor_x))))
-    bottom = min(height, int(round(anchor_y + scale * (height - anchor_y))))
-
+def _crop_to_box(image: np.ndarray, points: np.ndarray, box: tuple[int, int, int, int]) -> tuple[np.ndarray, np.ndarray]:
+    left, top, right, bottom = box
     cropped = image[top:bottom, left:right]
-    resized = cv2.resize(cropped, (width, height), interpolation=cv2.INTER_LINEAR)
-
-    scale_x = width / max(1, right - left)
-    scale_y = height / max(1, bottom - top)
     adjusted_points = points.copy()
-    adjusted_points[:, 0] = (points[:, 0] - left) * scale_x
-    adjusted_points[:, 1] = (points[:, 1] - top) * scale_y
-    return resized, adjusted_points
+    adjusted_points[:, 0] = points[:, 0] - left
+    adjusted_points[:, 1] = points[:, 1] - top
+    return cropped, adjusted_points
 
 
 def _face_oval_mask(shape: tuple[int, int], points: np.ndarray) -> np.ndarray:
@@ -228,17 +241,19 @@ def process_pair(before_bgr: np.ndarray, after_bgr: np.ndarray) -> tuple[np.ndar
         warnings.append(f"후 사진: {after_warning}")
 
     # 회전으로 생긴 흰 패딩 쐐기가 안 보이도록, 두 사진 다 패딩이 전혀 없는 영역까지만
-    # 남기고 잘라낸다. 둘 중 더 많이 잘라야 하는 쪽에 맞춰야 두 결과의 배율이 같아진다.
-    crop_scale = min(
-        _max_valid_crop_scale(before_valid_mask, CROP_ANCHOR),
-        _max_valid_crop_scale(after_valid_mask, CROP_ANCHOR),
+    # 남기고 잘라낸다. 가로/세로 각 방향을 독립적으로 넓힌 뒤, 두 사진 모두에게
+    # 안전한(패딩이 안 걸리는) 교집합 영역으로 맞춘다 — 그래야 두 결과의 크기가 같아진다.
+    before_box = _max_valid_margins(before_valid_mask, CROP_ANCHOR)
+    after_box = _max_valid_margins(after_valid_mask, CROP_ANCHOR)
+    final_box = (
+        max(before_box[0], after_box[0]),
+        max(before_box[1], after_box[1]),
+        min(before_box[2], after_box[2]),
+        min(before_box[3], after_box[3]),
     )
-    aligned_before, before_canonical_points = _crop_to_scale(
-        aligned_before, before_canonical_points, crop_scale, CROP_ANCHOR
-    )
-    aligned_after, after_canonical_points = _crop_to_scale(
-        aligned_after, after_canonical_points, crop_scale, CROP_ANCHOR
-    )
+    logger.info("crop: before=%s after=%s -> using=%s (canvas=%dx%d)", before_box, after_box, final_box, CANVAS_WIDTH, CANVAS_HEIGHT)
+    aligned_before, before_canonical_points = _crop_to_box(aligned_before, before_canonical_points, final_box)
+    aligned_after, after_canonical_points = _crop_to_box(aligned_after, after_canonical_points, final_box)
 
     matched_after = _match_color(aligned_before, before_canonical_points, aligned_after, after_canonical_points)
 
