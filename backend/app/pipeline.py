@@ -6,17 +6,21 @@ import numpy as np
 from .landmarks import (
     EYEBROW_IDX,
     FACE_OVAL_RING,
-    LEFT_EYE_IDX,
-    RIGHT_EYE_IDX,
+    LEFT_EYEBROW_IDX,
+    RIGHT_EYEBROW_IDX,
     detect_landmarks,
 )
 
-# 정렬 기준이 되는 캔버스: 두 눈을 항상 같은 위치·거리로 맞춰서
+# 정렬 기준이 되는 캔버스: 두 눈썹을 항상 같은 위치·거리·수평으로 맞춰서
 # 전/후 사진의 각도(회전)와 크기(스케일)를 동시에 정규화한다 (PRD 6.2, 6.3).
-CANVAS_WIDTH = 800
-CANVAS_HEIGHT = 1000
-TARGET_LEFT_EYE = np.array([320.0, 420.0], dtype=np.float32)
-TARGET_RIGHT_EYE = np.array([480.0, 420.0], dtype=np.float32)
+# 눈이 아니라 눈썹을 기준으로 삼은 이유: 모발이식 병원에서는 눈썹이 헤어라인과 함께
+# 핵심적으로 노출·비교되는 부위라, 눈썹 자체가 수평이 되는 게 더 중요하다.
+# 위쪽 여백을 넉넉히 둬서(눈썹 기준 위로 CANVAS_HEIGHT의 절반 이상) 헤어라인이
+# 캔버스 밖으로 잘려나가지 않게 한다.
+CANVAS_WIDTH = 900
+CANVAS_HEIGHT = 1300
+TARGET_LEFT_BROW = np.array([370.0, 550.0], dtype=np.float32)
+TARGET_RIGHT_BROW = np.array([530.0, 550.0], dtype=np.float32)
 
 # 눈썹 아래로 이 픽셀만큼 여유를 두고 그 아래(눈·코·입·볼·턱)만 모자이크한다.
 # 눈썹 위쪽(이마~헤어라인)은 그대로 노출된다 (PRD 6.5).
@@ -27,24 +31,24 @@ MOSAIC_DOWNSCALE_FACTOR = 0.06
 MAX_TRUSTED_ROTATION_DEG = 45.0
 
 
-def _eye_center(points: np.ndarray, indices: list[int]) -> np.ndarray:
+def _landmark_center(points: np.ndarray, indices: list[int]) -> np.ndarray:
     return points[indices].mean(axis=0)
 
 
-def _screen_ordered_eyes(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """MediaPipe의 LEFT/RIGHT 눈 라벨은 화면 기준이 아니라 피사체 본인의 해부학적
+def _screen_ordered_brows(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """MediaPipe의 LEFT/RIGHT 눈썹 라벨은 화면 기준이 아니라 피사체 본인의 해부학적
     좌/우를 가리킨다 (셀카가 아닌 일반 정면 사진에서는 반대로 나타남). 라벨을 믿는 대신
     사진에 실제로 찍힌 x좌표로 화면상 왼쪽/오른쪽을 정해야, 엉뚱하게 180도 가까이
     돌아가는 정렬(상하 반전)을 막을 수 있다."""
-    eye_a = _eye_center(points, LEFT_EYE_IDX)
-    eye_b = _eye_center(points, RIGHT_EYE_IDX)
-    return (eye_a, eye_b) if eye_a[0] <= eye_b[0] else (eye_b, eye_a)
+    brow_a = _landmark_center(points, LEFT_EYEBROW_IDX)
+    brow_b = _landmark_center(points, RIGHT_EYEBROW_IDX)
+    return (brow_a, brow_b) if brow_a[0] <= brow_b[0] else (brow_b, brow_a)
 
 
 def _align_to_canonical(image_bgr: np.ndarray, points: np.ndarray) -> tuple[np.ndarray, np.ndarray, str | None]:
-    screen_left_eye, screen_right_eye = _screen_ordered_eyes(points)
-    src = np.array([screen_left_eye, screen_right_eye], dtype=np.float32)
-    dst = np.array([TARGET_LEFT_EYE, TARGET_RIGHT_EYE], dtype=np.float32)
+    screen_left_brow, screen_right_brow = _screen_ordered_brows(points)
+    src = np.array([screen_left_brow, screen_right_brow], dtype=np.float32)
+    dst = np.array([TARGET_LEFT_BROW, TARGET_RIGHT_BROW], dtype=np.float32)
 
     transform, _ = cv2.estimateAffinePartial2D(src, dst)
 
@@ -150,7 +154,6 @@ def process_pair(before_bgr: np.ndarray, after_bgr: np.ndarray) -> tuple[np.ndar
 
     matched_after = _match_color(aligned_before, before_canonical_points, aligned_after, after_canonical_points)
 
-    result_before = _apply_face_mosaic(aligned_before, before_canonical_points)
-    result_after = _apply_face_mosaic(matched_after, after_canonical_points)
-
-    return result_before, result_after, warnings
+    # TODO: 모자이크(PRD 6.5)는 정렬 결과를 먼저 확인하기 위해 잠시 비활성화했다.
+    # _apply_face_mosaic(image, points)를 다시 연결하면 된다.
+    return aligned_before, matched_after, warnings
