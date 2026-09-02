@@ -52,7 +52,7 @@ MOSAIC_FEATHER_RATIO = 0.04
 # 얼굴 윤곽(FACE_OVAL) 폴리곤은 팽창이 아니라 오히려 살짝 안쪽으로 줄인다(침식).
 # 모발이식 환자는 헤어라인이 후퇴해 있는 경우가 많아, FACE_OVAL이 실제보다 관자놀이
 # 쪽으로 넓게 잡히기 쉽다 — 그대로 쓰면 구레나룻·헤어라인이 가려진다.
-MOSAIC_OVAL_ERODE_RATIO = 0.07
+MOSAIC_OVAL_ERODE_RATIO = 0.15
 # 눈·코는 얼굴 윤곽에 기대지 않고 각자의 랜드마크로 직접 가린다 — 윤곽을 안쪽으로
 # 줄였으니 이 부위는 이걸로 확실히 보장한다. 여유는 작게(구레나룻 침범 방지).
 MOSAIC_FEATURE_DILATE_RATIO = 0.06
