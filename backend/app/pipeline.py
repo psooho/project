@@ -40,10 +40,11 @@ BACK_MARGIN_EXTEND_RATIO = 0.93
 SIDE_ASYMMETRY_THRESHOLD = 0.2
 
 # 눈썹 아래 경계선. 양수면 눈썹 아래로 여유를 두고(그만큼 눈이 노출될 수 있음),
-# 음수면 눈썹 하단을 살짝 파고들어서라도 눈을 확실히 가린다. 눈썹만 남기고 눈은
-# 완전히 가리는 걸 우선하므로 음수로 잡는다.
-BROW_EXPOSURE_PADDING_PX = -12
-MOSAIC_DOWNSCALE_FACTOR = 0.06
+# 음수면 눈썹 하단을 살짝 파고든다(그만큼 눈썹 일부가 가려질 수 있음). 눈은 확실히
+# 가리되 눈썹은 온전히 남기는 게 목표라, 0에 가깝게 살짝만 파고드는 값으로 잡는다.
+BROW_EXPOSURE_PADDING_PX = -4
+# 블러 강도 — 값이 클수록 더 강하게 흐려진다.
+MOSAIC_BLUR_KERNEL_RATIO = 0.05
 
 # 회전 보정이 이 각도를 넘으면 정렬 신뢰도가 낮다고 보고 경고만 남긴다 (PRD 6.2).
 MAX_TRUSTED_ROTATION_DEG = 45.0
@@ -239,11 +240,12 @@ def _match_color(
     return cv2.cvtColor(result_lab, cv2.COLOR_LAB2BGR)
 
 
-def _pixelate(image: np.ndarray, factor: float) -> np.ndarray:
+def _blur(image: np.ndarray, kernel_ratio: float) -> np.ndarray:
     height, width = image.shape[:2]
-    small_size = (max(1, int(width * factor)), max(1, int(height * factor)))
-    small = cv2.resize(image, small_size, interpolation=cv2.INTER_LINEAR)
-    return cv2.resize(small, (width, height), interpolation=cv2.INTER_NEAREST)
+    kernel = int(min(width, height) * kernel_ratio)
+    kernel = kernel + 1 if kernel % 2 == 0 else kernel  # GaussianBlur는 홀수 커널만 허용
+    kernel = max(3, kernel)
+    return cv2.GaussianBlur(image, (kernel, kernel), 0)
 
 
 def _apply_face_mosaic(image: np.ndarray, points: np.ndarray) -> np.ndarray:
@@ -255,10 +257,10 @@ def _apply_face_mosaic(image: np.ndarray, points: np.ndarray) -> np.ndarray:
     mosaic_mask = face_mask.copy()
     mosaic_mask[:brow_bottom_y, :] = 0  # 눈썹 위(이마·헤어라인)는 모자이크 대상에서 제외
 
-    pixelated = _pixelate(image, MOSAIC_DOWNSCALE_FACTOR)
+    blurred = _blur(image, MOSAIC_BLUR_KERNEL_RATIO)
     result = image.copy()
     hide = mosaic_mask > 0
-    result[hide] = pixelated[hide]
+    result[hide] = blurred[hide]
     return result
 
 
