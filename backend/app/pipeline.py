@@ -23,16 +23,36 @@ TARGET_RIGHT_EYE = np.array([480.0, 420.0], dtype=np.float32)
 BROW_EXPOSURE_PADDING_PX = 18
 MOSAIC_DOWNSCALE_FACTOR = 0.06
 
+# 회전 보정이 이 각도를 넘으면 정렬 신뢰도가 낮다고 보고 경고만 남긴다 (PRD 6.2).
+MAX_TRUSTED_ROTATION_DEG = 45.0
+
 
 def _eye_center(points: np.ndarray, indices: list[int]) -> np.ndarray:
     return points[indices].mean(axis=0)
 
 
-def _align_to_canonical(image_bgr: np.ndarray, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    src = np.array([_eye_center(points, LEFT_EYE_IDX), _eye_center(points, RIGHT_EYE_IDX)], dtype=np.float32)
+def _screen_ordered_eyes(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """MediaPipe의 LEFT/RIGHT 눈 라벨은 화면 기준이 아니라 피사체 본인의 해부학적
+    좌/우를 가리킨다 (셀카가 아닌 일반 정면 사진에서는 반대로 나타남). 라벨을 믿는 대신
+    사진에 실제로 찍힌 x좌표로 화면상 왼쪽/오른쪽을 정해야, 엉뚱하게 180도 가까이
+    돌아가는 정렬(상하 반전)을 막을 수 있다."""
+    eye_a = _eye_center(points, LEFT_EYE_IDX)
+    eye_b = _eye_center(points, RIGHT_EYE_IDX)
+    return (eye_a, eye_b) if eye_a[0] <= eye_b[0] else (eye_b, eye_a)
+
+
+def _align_to_canonical(image_bgr: np.ndarray, points: np.ndarray) -> tuple[np.ndarray, np.ndarray, str | None]:
+    screen_left_eye, screen_right_eye = _screen_ordered_eyes(points)
+    src = np.array([screen_left_eye, screen_right_eye], dtype=np.float32)
     dst = np.array([TARGET_LEFT_EYE, TARGET_RIGHT_EYE], dtype=np.float32)
 
     transform, _ = cv2.estimateAffinePartial2D(src, dst)
+
+    warning = None
+    rotation_deg = float(np.degrees(np.arctan2(transform[1, 0], transform[0, 0])))
+    if abs(rotation_deg) > MAX_TRUSTED_ROTATION_DEG:
+        warning = "얼굴 각도가 너무 기울어져 있어 정렬 결과의 신뢰도가 낮을 수 있습니다."
+
     aligned = cv2.warpAffine(
         image_bgr,
         transform,
@@ -44,7 +64,7 @@ def _align_to_canonical(image_bgr: np.ndarray, points: np.ndarray) -> tuple[np.n
 
     ones = np.ones((points.shape[0], 1), dtype=np.float32)
     aligned_points = np.hstack([points, ones]) @ transform.T
-    return aligned, aligned_points
+    return aligned, aligned_points, warning
 
 
 def _face_oval_mask(shape: tuple[int, int], points: np.ndarray) -> np.ndarray:
@@ -121,8 +141,12 @@ def process_pair(before_bgr: np.ndarray, after_bgr: np.ndarray) -> tuple[np.ndar
     if before_points is None or after_points is None:
         return before_bgr, after_bgr, warnings
 
-    aligned_before, before_canonical_points = _align_to_canonical(before_bgr, before_points)
-    aligned_after, after_canonical_points = _align_to_canonical(after_bgr, after_points)
+    aligned_before, before_canonical_points, before_warning = _align_to_canonical(before_bgr, before_points)
+    aligned_after, after_canonical_points, after_warning = _align_to_canonical(after_bgr, after_points)
+    if before_warning:
+        warnings.append(f"전 사진: {before_warning}")
+    if after_warning:
+        warnings.append(f"후 사진: {after_warning}")
 
     matched_after = _match_color(aligned_before, before_canonical_points, aligned_after, after_canonical_points)
 
