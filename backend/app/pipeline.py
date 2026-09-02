@@ -45,6 +45,8 @@ SIDE_ASYMMETRY_THRESHOLD = 0.2
 BROW_EXPOSURE_PADDING_PX = -4
 # 블러 강도 — 값이 클수록 더 강하게 흐려진다. 최대한 강하게 요청받아 크게 잡았다.
 MOSAIC_BLUR_KERNEL_RATIO = 0.35
+# 블러 영역 경계를 얼마나 부드럽게 퍼뜨릴지 — 값이 클수록 그라데이션 폭이 넓어진다.
+MOSAIC_FEATHER_RATIO = 0.025
 
 # 회전 보정이 이 각도를 넘으면 정렬 신뢰도가 낮다고 보고 경고만 남긴다 (PRD 6.2).
 MAX_TRUSTED_ROTATION_DEG = 45.0
@@ -240,11 +242,15 @@ def _match_color(
     return cv2.cvtColor(result_lab, cv2.COLOR_LAB2BGR)
 
 
-def _blur(image: np.ndarray, kernel_ratio: float) -> np.ndarray:
-    height, width = image.shape[:2]
-    kernel = int(min(width, height) * kernel_ratio)
+def _odd_kernel_size(shape: tuple[int, int], ratio: float) -> int:
+    height, width = shape
+    kernel = int(min(width, height) * ratio)
     kernel = kernel + 1 if kernel % 2 == 0 else kernel  # GaussianBlur는 홀수 커널만 허용
-    kernel = max(3, kernel)
+    return max(3, kernel)
+
+
+def _blur(image: np.ndarray, kernel_ratio: float) -> np.ndarray:
+    kernel = _odd_kernel_size(image.shape[:2], kernel_ratio)
     return cv2.GaussianBlur(image, (kernel, kernel), 0)
 
 
@@ -257,11 +263,16 @@ def _apply_face_mosaic(image: np.ndarray, points: np.ndarray) -> np.ndarray:
     mosaic_mask = face_mask.copy()
     mosaic_mask[:brow_bottom_y, :] = 0  # 눈썹 위(이마·헤어라인)는 모자이크 대상에서 제외
 
+    # 마스크 자체를 블러 처리해서 0~255 사이의 부드러운 경계(그라데이션)로 만든 뒤,
+    # 그 값을 알파값 삼아 원본과 블러 이미지를 섞는다 — 마스크를 그대로 써서
+    # 딱 잘라 바꾸면 경계가 뚜렷하게 티가 난다.
+    feather_kernel = _odd_kernel_size(mosaic_mask.shape, MOSAIC_FEATHER_RATIO)
+    alpha = cv2.GaussianBlur(mosaic_mask, (feather_kernel, feather_kernel), 0).astype(np.float32) / 255.0
+    alpha = alpha[:, :, None]
+
     blurred = _blur(image, MOSAIC_BLUR_KERNEL_RATIO)
-    result = image.copy()
-    hide = mosaic_mask > 0
-    result[hide] = blurred[hide]
-    return result
+    blended = image.astype(np.float32) * (1 - alpha) + blurred.astype(np.float32) * alpha
+    return np.clip(blended, 0, 255).astype(np.uint8)
 
 
 def process_pair(
