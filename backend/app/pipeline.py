@@ -39,9 +39,10 @@ FRONT_MARGIN_TRIM_RATIO = 0.5
 BACK_MARGIN_EXTEND_RATIO = 0.93
 SIDE_ASYMMETRY_THRESHOLD = 0.2
 
-# 눈썹 아래로 이 픽셀만큼 여유를 두고 그 아래(눈·코·입·볼·턱)만 모자이크한다.
-# 눈썹 위쪽(이마~헤어라인)은 그대로 노출된다 (PRD 6.5).
-BROW_EXPOSURE_PADDING_PX = 18
+# 눈썹 아래 경계선. 양수면 눈썹 아래로 여유를 두고(그만큼 눈이 노출될 수 있음),
+# 음수면 눈썹 하단을 살짝 파고들어서라도 눈을 확실히 가린다. 눈썹만 남기고 눈은
+# 완전히 가리는 걸 우선하므로 음수로 잡는다.
+BROW_EXPOSURE_PADDING_PX = -12
 MOSAIC_DOWNSCALE_FACTOR = 0.06
 
 # 회전 보정이 이 각도를 넘으면 정렬 신뢰도가 낮다고 보고 경고만 남긴다 (PRD 6.2).
