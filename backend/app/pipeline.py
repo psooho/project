@@ -29,6 +29,15 @@ CANVAS_HEIGHT = 1700
 TARGET_LEFT_BROW = np.array([820.0, 750.0], dtype=np.float32)
 TARGET_RIGHT_BROW = np.array([980.0, 750.0], dtype=np.float32)
 CROP_ANCHOR = ((TARGET_LEFT_BROW[0] + TARGET_RIGHT_BROW[0]) / 2, TARGET_LEFT_BROW[1])
+TARGET_INTERBROW_PX = TARGET_RIGHT_BROW[0] - TARGET_LEFT_BROW[0]
+
+# 귀는 눈썹보다 얼굴 안쪽이 아니라 옆쪽으로 더 나가 있어서, 패딩 없는 크롭만으로는
+# (원본 사진에 따라) 귀 앞에서 잘릴 수 있다. 좌우 각각 최소 이만큼은 앵커에서 확보하고,
+# 모자라면 흰 여백을 더해서라도(원본 warpAffine이 이미 흰색으로 채워둔 캔버스 여유분을
+# 그대로 씀) 귀가 잘리지 않게 한다 — 회전 때문에 생기는 대각선 패딩과 달리, 이건 좌우
+# 수직 테두리로만 추가되므로 전체 틀은 여전히 반듯한 직사각형을 유지한다.
+# 경험적으로 잡은 값 — 실제로 봐가며 조정이 필요할 수 있다.
+MIN_HALF_WIDTH_PX = 4.0 * TARGET_INTERBROW_PX
 
 # 눈썹 아래로 이 픽셀만큼 여유를 두고 그 아래(눈·코·입·볼·턱)만 모자이크한다.
 # 눈썹 위쪽(이마~헤어라인)은 그대로 노출된다 (PRD 6.5).
@@ -146,6 +155,18 @@ def _max_valid_margins(valid_mask: np.ndarray, anchor: tuple[float, float]) -> t
     return box_at(scale)
 
 
+def _ensure_min_half_width(
+    box: tuple[int, int, int, int], min_half_width: float, anchor_x: float, canvas_width: int
+) -> tuple[int, int, int, int]:
+    """box의 좌/우 여백이 min_half_width보다 좁으면, 귀가 잘리지 않도록 그만큼 넓힌다.
+    캔버스 자체가 이미 흰색으로 채워져 있는 영역이라 안전하게 슬라이스할 수 있다."""
+    left, top, right, bottom = box
+    ax = int(round(anchor_x))
+    left = min(left, max(0, ax - int(min_half_width)))
+    right = max(right, min(canvas_width, ax + int(min_half_width)))
+    return left, top, right, bottom
+
+
 def _crop_to_box(image: np.ndarray, points: np.ndarray, box: tuple[int, int, int, int]) -> tuple[np.ndarray, np.ndarray]:
     left, top, right, bottom = box
     cropped = image[top:bottom, left:right]
@@ -251,6 +272,7 @@ def process_pair(before_bgr: np.ndarray, after_bgr: np.ndarray) -> tuple[np.ndar
         min(before_box[2], after_box[2]),
         min(before_box[3], after_box[3]),
     )
+    final_box = _ensure_min_half_width(final_box, MIN_HALF_WIDTH_PX, CROP_ANCHOR[0], CANVAS_WIDTH)
     logger.info("crop: before=%s after=%s -> using=%s (canvas=%dx%d)", before_box, after_box, final_box, CANVAS_WIDTH, CANVAS_HEIGHT)
     aligned_before, before_canonical_points = _crop_to_box(aligned_before, before_canonical_points, final_box)
     aligned_after, after_canonical_points = _crop_to_box(aligned_after, after_canonical_points, final_box)
