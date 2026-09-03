@@ -32,7 +32,11 @@ function revokeResultSet(set: ResultSet | null) {
   URL.revokeObjectURL(set.urls.after);
 }
 
-const API_BASE_URL = "http://localhost:8000";
+// 상대경로로 호출한다. 배포 환경에서는 백엔드가 이 프론트엔드를 같이 서빙해서 같은
+// 오리진이고, 개발 중에는 vite.config.ts의 프록시가 백엔드로 넘겨준다.
+// (예전엔 "http://localhost:8000"을 박아뒀는데, 그러면 다른 PC에서 열었을 때
+// localhost가 그 PC 자신을 가리켜서 무조건 실패한다.)
+const API_BASE_URL = "";
 
 // 실제 정렬(각도·크기)/밝기·색감 보정/헤어라인·눈썹만 남기는 모자이크 처리는
 // 백엔드 파이프라인(backend/app/main.py의 process_pair, PRD 6.2~6.5)에서 이뤄진다.

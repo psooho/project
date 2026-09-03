@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: before-after-photo
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # 실측 결과 요청 처리 중 최대 약 335MB를 쓴다(블러 단계에서 캔버스의 float32 사본이
+    # 여러 개 생김). 512MB 플랜은 아슬아슬하므로 1GB 이상을 쓴다.
+    plan: standard
+    healthCheckPath: /api/health
