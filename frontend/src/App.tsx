@@ -1,5 +1,6 @@
 import { useState } from "react";
 import "./App.css";
+import { clearStoredPassword, getStoredPassword } from "./components/PasswordGate";
 import { PhotoDropzone } from "./components/PhotoDropzone";
 
 type Status = "idle" | "processing" | "done";
@@ -46,7 +47,17 @@ async function processPair(before: File, after: File, mosaic: boolean): Promise<
   formData.append("after", after);
   formData.append("mosaic", String(mosaic));
 
-  const res = await fetch(`${API_BASE_URL}/api/process`, { method: "POST", body: formData });
+  const res = await fetch(`${API_BASE_URL}/api/process`, {
+    method: "POST",
+    headers: { "X-App-Password": getStoredPassword() },
+    body: formData,
+  });
+  if (res.status === 401) {
+    // 암호가 바뀐 경우. 저장된 암호를 지우고 새로고침하면 다시 입력 화면이 뜬다.
+    clearStoredPassword();
+    window.location.reload();
+    throw new Error("암호가 변경되었습니다.");
+  }
   if (!res.ok) throw new Error("서버 처리에 실패했습니다.");
 
   const data: { before: string; after: string; warnings?: string[] } = await res.json();

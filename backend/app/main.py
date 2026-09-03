@@ -1,11 +1,13 @@
 import base64
 import logging
+import os
+import secrets
 from io import BytesIO
 from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -16,7 +18,19 @@ from .pipeline import process_pair
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("app")
 
+# 공용 암호. 환경변수로 넣으면 그 암호를 아는 사람만 쓸 수 있고, 안 넣으면(로컬 개발)
+# 인증 없이 그냥 동작한다. 코드에 암호를 박지 않으려고 환경변수로 뺐다.
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+
 app = FastAPI(title="전후사진 변환 API")
+
+
+def require_password(x_app_password: str = Header(default="")) -> None:
+    if not APP_PASSWORD:
+        return
+    # 타이밍 공격을 피하려고 단순 == 대신 compare_digest를 쓴다.
+    if not secrets.compare_digest(x_app_password, APP_PASSWORD):
+        raise HTTPException(status_code=401, detail="암호가 올바르지 않습니다.")
 
 # 개발 중에는 프론트엔드가 5173에서 따로 뜨므로 CORS가 필요하다. 배포 시에는 아래에서
 # 빌드된 프론트엔드를 같은 오리진으로 서빙하므로 이 설정은 쓰이지 않는다.
@@ -51,7 +65,16 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/api/process")
+@app.get("/api/auth")
+def auth_status(x_app_password: str = Header(default="")) -> dict[str, bool]:
+    """프론트엔드가 "암호가 필요한 서버인지", "지금 가진 암호가 맞는지"를 확인하는 용도."""
+    return {
+        "required": bool(APP_PASSWORD),
+        "valid": not APP_PASSWORD or secrets.compare_digest(x_app_password, APP_PASSWORD),
+    }
+
+
+@app.post("/api/process", dependencies=[Depends(require_password)])
 async def process(
     before: UploadFile = File(...),
     after: UploadFile = File(...),
