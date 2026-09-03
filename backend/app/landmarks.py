@@ -1,3 +1,5 @@
+import logging
+import threading
 from pathlib import Path
 
 import mediapipe as mp
@@ -5,6 +7,8 @@ import numpy as np
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.core.base_options import BaseOptions
 from mediapipe.tasks.python.vision import FaceLandmarksConnections
+
+logger = logging.getLogger("landmarks")
 
 MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "face_landmarker.task"
 
@@ -14,6 +18,9 @@ _options = vision.FaceLandmarkerOptions(
     num_faces=1,
 )
 _landmarker = vision.FaceLandmarker.create_from_options(_options)
+# MediaPipe의 IMAGE 모드 태스크는 스레드 안전하지 않다. 요청은 스레드풀에서 처리되므로
+# 전역 인스턴스를 여러 스레드가 동시에 건드리지 않도록 직렬화한다.
+_landmarker_lock = threading.Lock()
 
 
 def _unique_indices(connections) -> list[int]:
@@ -64,8 +71,10 @@ def detect_landmarks(image_rgb: np.ndarray) -> np.ndarray | None:
     None when no face is found."""
     height, width = image_rgb.shape[:2]
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(image_rgb))
-    result = _landmarker.detect(mp_image)
+    with _landmarker_lock:
+        result = _landmarker.detect(mp_image)
     if not result.face_landmarks:
+        logger.info("no face detected in %dx%d image", width, height)
         return None
     points = result.face_landmarks[0]
     return np.array([[p.x * width, p.y * height] for p in points], dtype=np.float32)

@@ -7,7 +7,7 @@ import numpy as np
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image
+from PIL import Image, ImageOps
 
 from .pipeline import process_pair
 
@@ -24,7 +24,10 @@ app.add_middleware(
 
 
 def _upload_to_bgr(data: bytes) -> np.ndarray:
-    image = Image.open(BytesIO(data)).convert("RGB")
+    # 휴대폰 사진은 픽셀을 눕혀서 저장하고 "돌려서 보여라"는 EXIF 태그만 붙이는 경우가
+    # 많다. PIL은 그 태그를 자동 적용하지 않으므로, 그대로 쓰면 옆으로 누운 얼굴이
+    # 들어가 얼굴 검출에 실패한다.
+    image = ImageOps.exif_transpose(Image.open(BytesIO(data))).convert("RGB")
     return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
 
