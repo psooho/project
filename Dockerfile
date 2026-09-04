@@ -10,10 +10,15 @@ RUN npm run build
 FROM python:3.12-slim
 WORKDIR /app
 
-# opencv/mediapipe가 요구하는 시스템 라이브러리
+# opencv/mediapipe가 요구하는 시스템 라이브러리.
+# mediapipe는 import 시점에 OpenGL/EGL 계열을 찾는다 — libegl1이 없으면
+# "libEGL.so.1: cannot open shared object file"로 컨테이너가 시작하자마자 죽는다.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
+    libegl1 \
+    libgles2 \
     libglib2.0-0 \
+    libgomp1 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 

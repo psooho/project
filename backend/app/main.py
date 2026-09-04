@@ -22,14 +22,37 @@ logger = logging.getLogger("app")
 # 인증 없이 그냥 동작한다. 코드에 암호를 박지 않으려고 환경변수로 뺐다.
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 
+if APP_PASSWORD and not APP_PASSWORD.isascii():
+    # 브라우저마다 비ASCII 헤더 처리가 달라 로그인이 실패할 수 있다. 관리자가 원인을
+    # 바로 알 수 있도록 시작할 때 경고를 남긴다.
+    logger.warning("APP_PASSWORD에 영문·숫자 외 문자가 있습니다. 브라우저에 따라 로그인이 실패할 수 있습니다.")
+
 app = FastAPI(title="전후사진 변환 API")
+
+
+def _password_matches(candidate: str) -> bool:
+    """헤더로 받은 암호가 설정된 암호와 같은지 확인한다.
+
+    문자열을 compare_digest에 그대로 넘기면 한글 등 비ASCII 암호에서 TypeError가 나므로
+    바이트로 비교한다. 또 HTTP 헤더 값은 latin-1로 디코딩되기 때문에, 클라이언트가 UTF-8
+    바이트를 그대로 실어 보낸 경우 원래 바이트를 되살려서도 한 번 더 비교한다.
+    """
+    expected = APP_PASSWORD.encode("utf-8")
+
+    attempts = [candidate.encode("utf-8")]
+    try:
+        attempts.append(candidate.encode("latin-1"))
+    except UnicodeEncodeError:
+        pass
+
+    # 타이밍 공격을 피하려고 단순 == 대신 compare_digest를 쓴다.
+    return any(secrets.compare_digest(attempt, expected) for attempt in attempts)
 
 
 def require_password(x_app_password: str = Header(default="")) -> None:
     if not APP_PASSWORD:
         return
-    # 타이밍 공격을 피하려고 단순 == 대신 compare_digest를 쓴다.
-    if not secrets.compare_digest(x_app_password, APP_PASSWORD):
+    if not _password_matches(x_app_password):
         raise HTTPException(status_code=401, detail="암호가 올바르지 않습니다.")
 
 # 개발 중에는 프론트엔드가 5173에서 따로 뜨므로 CORS가 필요하다. 배포 시에는 아래에서
@@ -70,7 +93,7 @@ def auth_status(x_app_password: str = Header(default="")) -> dict[str, bool]:
     """프론트엔드가 "암호가 필요한 서버인지", "지금 가진 암호가 맞는지"를 확인하는 용도."""
     return {
         "required": bool(APP_PASSWORD),
-        "valid": not APP_PASSWORD or secrets.compare_digest(x_app_password, APP_PASSWORD),
+        "valid": not APP_PASSWORD or _password_matches(x_app_password),
     }
 
 
