@@ -42,6 +42,10 @@ FRONT_MARGIN_TRIM_RATIO = 0.6
 BACK_MARGIN_EXTEND_RATIO = 0.93
 SIDE_ASYMMETRY_THRESHOLD = 0.2
 
+# 정면 사진은 위 앞/뒤 보정을 건너뛰는데, 그러면 원본이 살짝 치우쳐 찍혔을 때 화면 왼쪽
+# 여백이 넓어 보인다. 정면일 때는 화면 왼쪽(보는 사람 기준) 여백만 이만큼으로 줄인다.
+FRONTAL_LEFT_TRIM_RATIO = 0.9
+
 # 눈썹 아래 경계선. 양수면 눈썹 아래로 여유를 두고(그만큼 눈이 노출될 수 있음),
 # 음수면 눈썹 하단을 살짝 파고든다(그만큼 눈썹 일부가 가려질 수 있음). 눈은 확실히
 # 가리되 눈썹은 온전히 남기는 게 목표라, 0에 가깝게 살짝만 파고드는 값으로 잡는다.
@@ -228,7 +232,7 @@ def _adjust_side_margins(
 
     정면 사진은 좌우 윤곽이 거의 대칭이라, 아주 작은 차이만으로 한쪽을 "앞쪽"으로
     판정해버리면 오히려 없던 비대칭을 만들어낸다. ASYMMETRY_THRESHOLD 이상 차이날
-    때만 보정하고, 정면처럼 비슷하면 좌우를 그대로 둔다."""
+    때만 앞/뒤 보정을 하고, 정면일 때는 화면 왼쪽 여백만 조금 줄인다."""
     ax = anchor_x
     left_reach = max(ax - points[FACE_OVAL_RING][:, 0].min() for points in points_list)
     right_reach = max(points[FACE_OVAL_RING][:, 0].max() - ax for points in points_list)
@@ -236,7 +240,8 @@ def _adjust_side_margins(
     left, top, right, bottom = box
     longer, shorter = max(left_reach, right_reach), min(left_reach, right_reach)
     if longer == 0 or (longer - shorter) / longer < SIDE_ASYMMETRY_THRESHOLD:
-        return box
+        # 정면: 앞/뒤 구분이 무의미하므로 그 보정은 하지 않고, 화면 왼쪽 여백만 살짝 줄인다.
+        return int(ax - (ax - left) * FRONTAL_LEFT_TRIM_RATIO), top, right, bottom
 
     if left_reach <= right_reach:
         left = int(ax - (ax - left) * front_trim_ratio)
