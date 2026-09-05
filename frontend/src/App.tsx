@@ -68,9 +68,34 @@ async function processPair(before: File, after: File, mosaic: boolean): Promise<
   return { before: beforeBlob, after: afterBlob, warnings: data.warnings ?? [] };
 }
 
+/** 이미 변환이 끝난 두 장을 보내서 전→후로 스르륵 넘어가는 GIF를 받아온다. */
+async function buildGif(before: Blob, after: Blob): Promise<Blob> {
+  const formData = new FormData();
+  formData.append("before", before, "before.jpg");
+  formData.append("after", after, "after.jpg");
+
+  const res = await fetch(`${API_BASE_URL}/api/gif`, {
+    method: "POST",
+    headers: { "X-App-Password": getStoredPassword() },
+    body: formData,
+  });
+  if (res.status === 401) {
+    clearStoredPassword();
+    window.location.reload();
+    throw new Error("암호가 변경되었습니다.");
+  }
+  if (!res.ok) throw new Error("GIF 생성에 실패했습니다.");
+  return res.blob();
+}
+
 function withJpgName(originalName: string, prefix: string) {
   const base = originalName.replace(/\.[^./\\]+$/, "");
   return `${prefix}_${base}.jpg`;
+}
+
+function withGifName(originalName: string) {
+  const base = originalName.replace(/\.[^./\\]+$/, "");
+  return `${base}_전후.gif`;
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -92,6 +117,7 @@ function App() {
   const [baseResult, setBaseResult] = useState<ResultSet | null>(null);
   const [mosaicResult, setMosaicResult] = useState<ResultSet | null>(null);
   const [showingMosaic, setShowingMosaic] = useState(false);
+  const [gifBusy, setGifBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const displayed = showingMosaic && mosaicResult ? mosaicResult : baseResult;
@@ -168,6 +194,21 @@ function App() {
     downloadBlob(displayed.results.after, withJpgName(afterPhoto.name, "after"));
   }
 
+  async function handleDownloadGif() {
+    if (!displayed || !beforePhoto || gifBusy) return;
+    setGifBusy(true);
+    setError(null);
+    try {
+      // 화면에 보이는 버전을 그대로 쓴다 — 모자이크를 적용해 뒀다면 GIF도 모자이크본이 된다.
+      const gif = await buildGif(displayed.results.before, displayed.results.after);
+      downloadBlob(gif, withGifName(beforePhoto.name));
+    } catch {
+      setError("GIF 만들기에 실패했습니다. 다시 시도해주세요.");
+    } finally {
+      setGifBusy(false);
+    }
+  }
+
   const canTransform = Boolean(beforePhoto && afterPhoto) && status === "idle";
 
   return (
@@ -220,6 +261,14 @@ function App() {
                 {mosaicStatus === "processing" ? "모자이크 처리 중..." : "모자이크"}
               </button>
             )}
+            <button
+              type="button"
+              className="submit-btn submit-btn--secondary"
+              disabled={gifBusy}
+              onClick={handleDownloadGif}
+            >
+              {gifBusy ? "GIF 만드는 중..." : "GIF 저장"}
+            </button>
           </>
         ) : (
           <button type="button" className="submit-btn" disabled={!canTransform} onClick={handleTransform}>

@@ -7,12 +7,13 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 
+from .animation import build_crossfade_gif
 from .pipeline import process_pair
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -115,6 +116,19 @@ async def process(
         "after": _bgr_to_data_url(result_after),
         "warnings": warnings,
     }
+
+
+@app.post("/api/gif", dependencies=[Depends(require_password)])
+async def make_gif(before: UploadFile = File(...), after: UploadFile = File(...)) -> Response:
+    """전→후로 스르륵 넘어가는 GIF를 만든다.
+
+    이미 변환이 끝난 두 장을 그대로 받는다. 원본을 다시 받아 정렬·보정을 다시 돌리면
+    시간이 오래 걸리고, 화면에 보이는 결과(모자이크 적용 여부 포함)와 달라질 수 있다."""
+    before_image = Image.open(BytesIO(await before.read()))
+    after_image = Image.open(BytesIO(await after.read()))
+
+    gif_bytes = await run_in_threadpool(build_crossfade_gif, before_image, after_image)
+    return Response(content=gif_bytes, media_type="image/gif")
 
 
 # 빌드된 프론트엔드를 같은 서버에서 서빙한다 — 배포가 컨테이너 하나로 끝나고, 프론트엔드가
