@@ -118,9 +118,19 @@ function App() {
   const [mosaicResult, setMosaicResult] = useState<ResultSet | null>(null);
   const [showingMosaic, setShowingMosaic] = useState(false);
   const [gifBusy, setGifBusy] = useState(false);
+  const [gifResult, setGifResult] = useState<{ blob: Blob; url: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const displayed = showingMosaic && mosaicResult ? mosaicResult : baseResult;
+
+  /** 만들어 둔 GIF는 지금 화면에 보이는 사진 기준이라, 사진이나 모자이크 상태가
+   *  바뀌면 더 이상 맞지 않는다. 그럴 때 지워서 다시 만들게 한다. */
+  function clearGif() {
+    setGifResult((prev) => {
+      if (prev) URL.revokeObjectURL(prev.url);
+      return null;
+    });
+  }
 
   function resetResults() {
     revokeResultSet(baseResult);
@@ -129,6 +139,7 @@ function App() {
     setMosaicResult(null);
     setShowingMosaic(false);
     setMosaicStatus("idle");
+    clearGif();
   }
 
   function handleBeforeChange(file: File | null) {
@@ -157,6 +168,7 @@ function App() {
       setMosaicResult(null);
       setShowingMosaic(false);
       setMosaicStatus("idle");
+      clearGif();
       setStatus("done");
     } catch {
       setError("변환 중 문제가 발생했습니다. 다시 시도해주세요.");
@@ -169,6 +181,7 @@ function App() {
     // 이미 한 번 계산해둔 모자이크 결과가 있으면 다시 요청하지 않고 바로 보여준다.
     if (mosaicResult) {
       setShowingMosaic(true);
+      clearGif();
       return;
     }
     setMosaicStatus("processing");
@@ -177,6 +190,7 @@ function App() {
       const processed = await processPair(beforePhoto, afterPhoto, true);
       setMosaicResult(toResultSet(processed));
       setShowingMosaic(true);
+      clearGif();
       setMosaicStatus("done");
     } catch {
       setError("모자이크 처리 중 문제가 발생했습니다. 다시 시도해주세요.");
@@ -186,6 +200,7 @@ function App() {
 
   function handleCancelMosaic() {
     setShowingMosaic(false);
+    clearGif();
   }
 
   function handleDownload() {
@@ -194,19 +209,25 @@ function App() {
     downloadBlob(displayed.results.after, withJpgName(afterPhoto.name, "after"));
   }
 
-  async function handleDownloadGif() {
-    if (!displayed || !beforePhoto || gifBusy) return;
+  async function handleMakeGif() {
+    if (!displayed || gifBusy) return;
     setGifBusy(true);
     setError(null);
     try {
       // 화면에 보이는 버전을 그대로 쓴다 — 모자이크를 적용해 뒀다면 GIF도 모자이크본이 된다.
-      const gif = await buildGif(displayed.results.before, displayed.results.after);
-      downloadBlob(gif, withGifName(beforePhoto.name));
+      const blob = await buildGif(displayed.results.before, displayed.results.after);
+      clearGif();
+      setGifResult({ blob, url: URL.createObjectURL(blob) });
     } catch {
       setError("GIF 만들기에 실패했습니다. 다시 시도해주세요.");
     } finally {
       setGifBusy(false);
     }
+  }
+
+  function handleDownloadGif() {
+    if (!gifResult || !beforePhoto) return;
+    downloadBlob(gifResult.blob, withGifName(beforePhoto.name));
   }
 
   const canTransform = Boolean(beforePhoto && afterPhoto) && status === "idle";
@@ -232,6 +253,16 @@ function App() {
           resultUrl={displayed?.urls.after}
         />
       </section>
+
+      {gifResult && (
+        <section className="gif-preview">
+          <div className="gif-preview-label">GIF 미리보기</div>
+          <img src={gifResult.url} alt="전후 전환 GIF 미리보기" />
+          <p className="gif-preview-note">
+            실제로 저장되는 파일입니다 ({Math.round(gifResult.blob.size / 1024).toLocaleString()}KB)
+          </p>
+        </section>
+      )}
 
       {displayed && displayed.results.warnings.length > 0 && (
         <div className="warning-banner">
@@ -261,14 +292,20 @@ function App() {
                 {mosaicStatus === "processing" ? "모자이크 처리 중..." : "모자이크"}
               </button>
             )}
-            <button
-              type="button"
-              className="submit-btn submit-btn--secondary"
-              disabled={gifBusy}
-              onClick={handleDownloadGif}
-            >
-              {gifBusy ? "GIF 만드는 중..." : "GIF 저장"}
-            </button>
+            {gifResult ? (
+              <button type="button" className="submit-btn submit-btn--secondary" onClick={handleDownloadGif}>
+                GIF 다운로드
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="submit-btn submit-btn--secondary"
+                disabled={gifBusy}
+                onClick={handleMakeGif}
+              >
+                {gifBusy ? "GIF 만드는 중..." : "GIF 만들기"}
+              </button>
+            )}
           </>
         ) : (
           <button type="button" className="submit-btn" disabled={!canTransform} onClick={handleTransform}>
