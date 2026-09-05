@@ -38,7 +38,7 @@ CROP_ANCHOR = ((TARGET_LEFT_BROW[0] + TARGET_RIGHT_BROW[0]) / 2, TARGET_LEFT_BRO
 # 뒤쪽을 넓히는 건 패딩 없는 크롭 범위를 넘어설 수 있어(흰 여백이 살짝 보일 수 있음),
 # 필요하다고 확인된 만큼만 적용한다. 정면 사진처럼 좌우가 비슷하면 이 보정 자체를
 # 건너뛴다 (자세한 조건은 _adjust_side_margins 참고).
-FRONT_MARGIN_TRIM_RATIO = 0.5
+FRONT_MARGIN_TRIM_RATIO = 0.6
 BACK_MARGIN_EXTEND_RATIO = 0.93
 SIDE_ASYMMETRY_THRESHOLD = 0.2
 
