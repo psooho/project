@@ -150,6 +150,8 @@ async def process(
     points: str = Form(""),
     scale_adjust: float = Form(1.0),
     level: bool = Form(False),
+    match_brightness: bool = Form(True),
+    match_tone: bool = Form(True),
 ) -> dict:
     manual_points = _parse_manual_points(points)
     if not MIN_SCALE_ADJUST <= scale_adjust <= MAX_SCALE_ADJUST:
@@ -161,7 +163,15 @@ async def process(
     after_bgr = _upload_to_bgr(await after.read())
 
     result_before, result_after, warnings = await run_in_threadpool(
-        process_pair, before_bgr, after_bgr, mosaic, manual_points, scale_adjust, level
+        process_pair,
+        before_bgr,
+        after_bgr,
+        mosaic,
+        manual_points,
+        scale_adjust,
+        level,
+        match_brightness,
+        match_tone,
     )
 
     return {

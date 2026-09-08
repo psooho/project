@@ -489,3 +489,26 @@
   color: #9ca3af;
   font-size: 0.78rem;
 }
+
+.toggle-btn {
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  color: #6b7280;
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.35rem 0.7rem;
+  cursor: pointer;
+}
+
+.toggle-btn--on {
+  background: #111827;
+  border-color: #111827;
+  color: #fff;
+  font-weight: 600;
+}
+
+.toggle-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
