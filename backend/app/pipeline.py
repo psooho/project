@@ -246,8 +246,13 @@ def _manual_transforms(
     """수동 기준점 모드에서 전/후 사진 각각의 변환을 구한다.
 
     두 단계로 나눈다. (1) 후 사진을 전 사진에 맞추는 변환 — 여기서만 기준점을 쓰고,
-    점이 많을수록 정확해진다. (2) 전 사진 기준의 화면 배치 — 1번→2번 점이 수평이 되도록
-    돌리고, 두 사진이 다 들어오도록 확대해 캔버스 가운데 놓는다.
+    점이 많을수록 정확해진다. (2) 화면 배치 — 두 사진이 다 들어오도록 확대해 캔버스
+    가운데 놓는다.
+
+    전 사진은 일부러 돌리지 않는다. 자동 모드는 찍힌 점이 눈썹인 걸 알기 때문에 수평으로
+    맞추는 게 의미가 있지만, 수동 모드는 사용자가 무엇을 찍었는지 알 수 없어서 특정 방향을
+    강제할 근거가 없다. 예전에는 1번→2번 점을 수평으로 맞췄는데, "두 점을 멀리 벌리라"는
+    안내를 따라 헤어라인 위와 눈썹처럼 세로로 찍으면 사진이 80도 넘게 누워버렸다.
 
     자동 모드처럼 기준점을 캔버스의 고정 좌표에 박지 않는 이유: 사용자가 어디를 찍을지
     알 수 없어서, 눈썹 양 끝처럼 멀리 떨어진 두 점을 고정 간격으로 줄이면 사진이 심하게
@@ -255,23 +260,15 @@ def _manual_transforms(
     after_to_before = _fit_similarity(after_anchors, before_anchors)
     residual = _fit_residual(after_anchors, before_anchors, after_to_before)
 
-    # 1번→2번 점을 수평으로. 오른쪽 점을 먼저 찍었더라도 사진이 뒤집히지 않게 방향만 맞춘다.
-    direction = np.asarray(before_anchors[1], dtype=np.float64) - np.asarray(before_anchors[0], dtype=np.float64)
-    if direction[0] < 0:
-        direction = -direction
-    angle = np.arctan2(direction[1], direction[0])
-    cos, sin = np.cos(-angle), np.sin(-angle)
-    rotation = np.array([[cos, -sin], [sin, cos]], dtype=np.float64)
-
-    # 두 사진의 네 귀퉁이를 모두 전 사진 좌표계로 모아, 회전 후 크기를 잰다.
+    # 두 사진의 네 귀퉁이를 모두 전 사진 좌표계로 모아 필요한 크기를 잰다.
     spread = np.vstack([
         _corners(before_shape),
         _apply_transform(_corners(after_shape), after_to_before),
-    ]) @ rotation.T
+    ])
     extent = spread.max(axis=0) - spread.min(axis=0)
     scale = MANUAL_FIT_SAFETY * min(CANVAS_WIDTH / extent[0], CANVAS_HEIGHT / extent[1])
 
-    linear = scale * rotation
+    linear = scale * np.eye(2)
     center = (spread.max(axis=0) + spread.min(axis=0)) / 2 * scale
     offset = np.array([CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2]) - center
     base = np.hstack([linear, offset.reshape(2, 1)]).astype(np.float32)
