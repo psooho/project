@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import "./App.css";
 import { clearStoredPassword, getStoredPassword } from "./components/PasswordGate";
 import { PhotoDropzone } from "./components/PhotoDropzone";
+import { AdjustSlider } from "./components/AdjustSlider";
 import { PointPicker } from "./components/PointPicker";
 import type { NormalizedPoint } from "./components/PointPicker";
 
@@ -216,11 +217,11 @@ function App() {
   // 눈썹을 자동으로 찾아 맞춘 결과인지. 사용자가 그 사실을 알아야 검토할 수 있다.
   const [autoAligned, setAutoAligned] = useState(false);
   const [autoLabels, setAutoLabels] = useState<string[]>([]);
-  const [brightnessStrength, setBrightnessStrength] = useState(1);
-  const [toneStrength, setToneStrength] = useState(1);
-  const [toneBusy, setToneBusy] = useState(false);
-  const [scaleAdjust, setScaleAdjust] = useState(1);
-  const [scaleBusy, setScaleBusy] = useState(false);
+  // 밝기·색감·크기 조절값. 셋 다 같은 방식으로 다시 계산하므로 한 덩어리로 다룬다.
+  const [adjust, setAdjust] = useState({ brightness: 1, tone: 1, scale: 1 });
+  const [adjustBusy, setAdjustBusy] = useState(false);
+  // 계산 중에 슬라이더를 또 움직이면 여기 담아뒀다가 끝난 뒤 한 번만 더 계산한다.
+  const pendingAdjust = useRef<typeof adjust | null>(null);
   // 지금 화면의 결과를 만들 때 쓴 기준점. 크기만 조정할 때 다시 찾지 않고 그대로 쓴다
   // (자동 탐색은 15~20초가 걸리고 호출 요금도 든다).
   const [lastPoints, setLastPoints] = useState<ManualPoints | undefined>(undefined);
@@ -263,9 +264,8 @@ function App() {
     setMosaicStatus("idle");
     setUsedManual(false);
     setAutoAligned(false);
-    setScaleAdjust(1);
-    setBrightnessStrength(1);
-    setToneStrength(1);
+    setAdjust({ brightness: 1, tone: 1, scale: 1 });
+    pendingAdjust.current = null;
     setLastPoints(undefined);
     setSuggestedPoints(null);
     setSuggestedLevel(false);
@@ -328,7 +328,7 @@ function App() {
     try {
       const first = await processPair(
         beforePhoto, afterPhoto, false, manual, 1, isSuggested(manual),
-        brightnessStrength, toneStrength,
+        adjust.brightness, adjust.tone,
       );
 
       // 얼굴을 못 찾았으면 눈썹 위치를 자동으로 받아 한 번 더 맞춰본다. 사용자가 점을
@@ -344,7 +344,7 @@ function App() {
               points,
               result: await processPair(
                 beforePhoto, afterPhoto, false, points, 1, suggested.level,
-                brightnessStrength, toneStrength,
+                adjust.brightness, adjust.tone,
               ),
             };
             setSuggestedPoints(points);
@@ -388,7 +388,7 @@ function App() {
       setUsedManual(Boolean(points));
       setAutoAligned(Boolean(auto));
       setLastPoints(points);
-      setScaleAdjust(1);
+      setAdjust({ brightness: 1, tone: 1, scale: 1 });
       if (!auto) setAutoLabels([]);
       clearGif();
       setStatus("done");
@@ -412,8 +412,8 @@ function App() {
     setError(null);
     try {
       const processed = await processPair(
-        beforePhoto, afterPhoto, true, lastPoints, scaleAdjust, isSuggested(lastPoints),
-        brightnessStrength, toneStrength,
+        beforePhoto, afterPhoto, true, lastPoints, adjust.scale, isSuggested(lastPoints),
+        adjust.brightness, adjust.tone,
       );
       setMosaicResult(toResultSet(processed));
       setShowingMosaic(true);
@@ -425,61 +425,44 @@ function App() {
     }
   }
 
-  /** 후 사진만 조금 키우거나 줄인다. 기준점은 그대로 두고 배율만 바꿔 다시 계산한다. */
-  async function handleScaleAdjust(delta: number) {
-    if (!beforePhoto || !afterPhoto || status !== "done" || scaleBusy) return;
-    const next = Math.round((scaleAdjust + delta) * 100) / 100;
-    if (next < SCALE_MIN || next > SCALE_MAX) return;
-    setScaleBusy(true);
-    setError(null);
-    try {
-      const processed = await processPair(
-        beforePhoto, afterPhoto, false, lastPoints, next, isSuggested(lastPoints),
-        brightnessStrength, toneStrength,
-      );
-      revokeResultSet(baseResult);
-      revokeResultSet(mosaicResult);
-      setBaseResult(toResultSet(processed));
-      setMosaicResult(null);
-      setShowingMosaic(false);
-      setMosaicStatus("idle");
-      setScaleAdjust(next);
-      clearGif();
-    } catch {
-      setError("크기 조정에 실패했습니다. 다시 시도해주세요.");
-    } finally {
-      setScaleBusy(false);
+  /** 밝기·색감·크기를 다시 계산한다. 정렬 기준점은 그대로 두므로 눈썹을 다시 찾지 않는다.
+   *
+   *  계산 중에 슬라이더를 또 움직이면 그 값을 담아뒀다가, 끝난 뒤 마지막 값으로 한 번만 더
+   *  계산한다. 요청을 그때그때 보내면 2초짜리 작업이 줄줄이 밀린다. */
+  async function applyAdjust(next: Partial<typeof adjust>) {
+    if (!beforePhoto || !afterPhoto || status !== "done") return;
+    const target = { ...adjust, ...next };
+    if (adjustBusy) {
+      pendingAdjust.current = target;
+      setAdjust(target);
+      return;
     }
-  }
-
-  /** 밝기 또는 색감 보정 세기를 한 단계 바꾼다. 정렬은 그대로 두고 색 처리만 다시 계산한다. */
-  async function handleMatchAdjust(kind: "brightness" | "tone", delta: number) {
-    if (!beforePhoto || !afterPhoto || status !== "done" || toneBusy) return;
-    const current = kind === "brightness" ? brightnessStrength : toneStrength;
-    const next = Math.round((current + delta) * 100) / 100;
-    if (next < MATCH_MIN || next > MATCH_MAX) return;
-    const brightness = kind === "brightness" ? next : brightnessStrength;
-    const tone = kind === "tone" ? next : toneStrength;
-    setToneBusy(true);
+    setAdjustBusy(true);
     setError(null);
+    let current = target;
     try {
-      const processed = await processPair(
-        beforePhoto, afterPhoto, false, lastPoints, scaleAdjust, isSuggested(lastPoints),
-        brightness, tone,
-      );
-      revokeResultSet(baseResult);
-      revokeResultSet(mosaicResult);
-      setBaseResult(toResultSet(processed));
-      setMosaicResult(null);
-      setShowingMosaic(false);
-      setMosaicStatus("idle");
-      setBrightnessStrength(brightness);
-      setToneStrength(tone);
-      clearGif();
+      for (;;) {
+        setAdjust(current);
+        const processed = await processPair(
+          beforePhoto, afterPhoto, false, lastPoints, current.scale, isSuggested(lastPoints),
+          current.brightness, current.tone,
+        );
+        revokeResultSet(baseResult);
+        revokeResultSet(mosaicResult);
+        setBaseResult(toResultSet(processed));
+        setMosaicResult(null);
+        setShowingMosaic(false);
+        setMosaicStatus("idle");
+        clearGif();
+        if (!pendingAdjust.current) break;
+        current = pendingAdjust.current;
+        pendingAdjust.current = null;
+      }
     } catch {
-      setError("보정 변경에 실패했습니다. 다시 시도해주세요.");
+      setError("조절에 실패했습니다. 다시 시도해주세요.");
     } finally {
-      setToneBusy(false);
+      pendingAdjust.current = null;
+      setAdjustBusy(false);
     }
   }
 
@@ -654,90 +637,39 @@ function App() {
         </section>
       )}
 
-      {status === "done" &&
-        (
-          [
-            ["밝기", brightnessStrength, "brightness"],
-            ["색감", toneStrength, "tone"],
-          ] as const
-        ).map(([label, value, kind]) => (
-          <div className="scale-control" key={kind}>
-            <span className="scale-label">{label} 보정</span>
-            <button
-              type="button"
-              className="scale-btn"
-              disabled={toneBusy || value - MATCH_STEP < MATCH_MIN}
-              onClick={() => handleMatchAdjust(kind, -MATCH_STEP)}
-            >
-              −
-            </button>
-            <span className={`scale-value${value !== 1 ? " scale-value--changed" : ""}`}>
-              {toneBusy ? "..." : `${Math.round(value * 100)}%`}
-            </span>
-            <button
-              type="button"
-              className="scale-btn"
-              disabled={toneBusy || value + MATCH_STEP > MATCH_MAX}
-              onClick={() => handleMatchAdjust(kind, MATCH_STEP)}
-            >
-              +
-            </button>
-            {value !== 1 && (
-              <button
-                type="button"
-                className="scale-reset"
-                disabled={toneBusy}
-                onClick={() => handleMatchAdjust(kind, 1 - value)}
-              >
-                되돌리기
-              </button>
-            )}
-            <span className="scale-hint">
-              {value === 0
-                ? "원본 그대로"
-                : value === 1
-                  ? "전 사진에 맞춤 (0%로 낮추면 원본)"
-                  : `보정 ${Math.round(value * 100)}%만 적용`}
-            </span>
-          </div>
-        ))}
-
       {status === "done" && (
-        <div className="scale-control">
-          <span className="scale-label">후 사진 크기</span>
-          <button
-            type="button"
-            className="scale-btn"
-            disabled={scaleBusy || scaleAdjust - SCALE_STEP < SCALE_MIN}
-            onClick={() => handleScaleAdjust(-SCALE_STEP)}
-          >
-            −
-          </button>
-          <span className={`scale-value${scaleAdjust !== 1 ? " scale-value--changed" : ""}`}>
-            {scaleBusy ? "..." : `${Math.round(scaleAdjust * 100)}%`}
-          </span>
-          <button
-            type="button"
-            className="scale-btn"
-            disabled={scaleBusy || scaleAdjust + SCALE_STEP > SCALE_MAX}
-            onClick={() => handleScaleAdjust(SCALE_STEP)}
-          >
-            +
-          </button>
-          {scaleAdjust !== 1 && (
-            <button
-              type="button"
-              className="scale-reset"
-              disabled={scaleBusy}
-              onClick={() => handleScaleAdjust(1 - scaleAdjust)}
-            >
-              되돌리기
-            </button>
-          )}
-          <span className="scale-hint">
-            두상 크기가 안 맞으면 눌러서 맞춰주세요 (2%씩)
-          </span>
-        </div>
+        <section className="adjust-panel">
+          <AdjustSlider
+            label="밝기 보정"
+            value={adjust.brightness}
+            min={MATCH_MIN}
+            max={MATCH_MAX}
+            step={MATCH_STEP}
+            busy={adjustBusy}
+            hint="0%면 원본, 100%면 전 사진에 맞춤"
+            onCommit={(value) => applyAdjust({ brightness: value })}
+          />
+          <AdjustSlider
+            label="색감 보정"
+            value={adjust.tone}
+            min={MATCH_MIN}
+            max={MATCH_MAX}
+            step={MATCH_STEP}
+            busy={adjustBusy}
+            hint="두 사진의 색이 실제로 다를 때만 효과가 보입니다"
+            onCommit={(value) => applyAdjust({ tone: value })}
+          />
+          <AdjustSlider
+            label="후 사진 크기"
+            value={adjust.scale}
+            min={SCALE_MIN}
+            max={SCALE_MAX}
+            step={SCALE_STEP}
+            busy={adjustBusy}
+            hint="두상 크기가 안 맞으면 끌어서 맞춰주세요"
+            onCommit={(value) => applyAdjust({ scale: value })}
+          />
+        </section>
       )}
 
       <div className="actions">
