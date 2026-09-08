@@ -87,6 +87,13 @@ MANUAL_FIT_SAFETY = 0.95
 # 정확히 맞아떨어져서 검사가 불가능하다). 남는 오차가 점들이 퍼진 범위의 이 비율을 넘으면
 # 서로 다른 자리를 찍은 것으로 보고 경고한다.
 MANUAL_RESIDUAL_WARN_RATIO = 0.06
+# 기준점(눈썹) 아래로 반드시 남겨둘 여백 — 기준점 사이 간격 대비 비율. 눈썹은 찍은 두 점
+# 아래로도 두께만큼 더 내려오는데, 사진을 키우면 그 두께도 같이 커진다. 이마 클로즈업은
+# 눈썹이 사진 맨 아래에 걸려 있어서 이 여백을 확보하지 않으면 배율을 조금만 바꿔도 잘린다.
+ANCHOR_BOTTOM_MARGIN_RATIO = 0.10
+# 사진 밖까지 넓힐 수 있는 한계 (크롭 높이 대비). 없는 부분은 가장자리를 늘여 채우는데,
+# 넓게 늘이면 세로 줄무늬가 눈에 띈다. 눈썹을 살리는 데 필요한 만큼만 얇게 쓴다.
+ANCHOR_BOTTOM_MAX_STRETCH = 0.04
 # 색 보정 통계를 낼 피부 픽셀의 YCrCb 범위. 자동 모드는 얼굴 윤곽 안쪽으로 범위를
 # 잡지만 수동 모드에는 윤곽이 없다. 프레임 전체를 쓰면 이식으로 늘어난 머리숱만큼
 # 후 사진이 어두워져, 그걸 상쇄하려고 엉뚱하게 밝아진다. 그래서 피부만 골라 쓴다.
@@ -178,8 +185,9 @@ def _align_to_canonical(
         transform,
         (CANVAS_WIDTH, CANVAS_HEIGHT),
         flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(255, 255, 255),
+        # 아래 여백을 확보하느라 크롭이 사진 밖으로 조금 넘어갈 수 있다. 흰색으로 두면
+        # 흰 띠가 생기지만, 가장자리를 늘여 채우면 피부가 살짝 번진 정도로 보인다.
+        borderMode=cv2.BORDER_REPLICATE,
     )
 
     # 회전 때문에 원본 사진이 캔버스 네 귀퉁이를 다 못 덮는 부분(흰 패딩 쐐기)을
@@ -601,6 +609,12 @@ def process_pair(
     aligned_after, after_canonical_points, after_valid_mask, after_warning = _align_to_canonical(
         after_bgr, after_transform, after_points
     )
+    before_alignment_points = (
+        _apply_transform(before_anchors, before_transform) if manual_points is not None else None
+    )
+    after_alignment_points = (
+        _apply_transform(after_anchors, after_transform) if manual_points is not None else None
+    )
     if before_warning:
         warnings.append(f"전 사진: {before_warning}")
     if after_warning:
@@ -654,6 +668,9 @@ def process_pair(
             )
             before_box = _max_valid_margins(before_valid_mask, crop_anchor)
 
+        before_alignment_points = _apply_transform(before_anchors, before_transform)
+        after_alignment_points = _apply_transform(after_anchors, after_transform)
+
         final_box = (
             max(before_box[0], after_box[0]),
             max(before_box[1], after_box[1]),
@@ -672,6 +689,22 @@ def process_pair(
             "scale adjust: x%.3f applied to %s (pivot y=%.0f)",
             scale_adjust, "after" if scale_adjust > 1 else "before", pivot[1],
         )
+
+    # 기준점(눈썹) 아래 여백을 확보한다. 크롭은 원래 "흰 여백이 전혀 없는 최대 사각형"인데,
+    # 사진이 눈썹 바로 아래에서 끝나면 그 규칙만으로는 눈썹이 경계에 걸린다. 필요한 만큼만
+    # 아래로 넓히고, 모자란 부분은 가장자리를 늘여 채운다.
+    anchor_sets = [p for p in (before_alignment_points, after_alignment_points) if p is not None]
+    if anchor_sets:
+        lowest = max(float(p[:, 1].max()) for p in anchor_sets)
+        spread = max(float(np.linalg.norm(p[1] - p[0])) for p in anchor_sets)
+        needed = lowest + spread * ANCHOR_BOTTOM_MARGIN_RATIO
+        limit = final_box[3] + (final_box[3] - final_box[1]) * ANCHOR_BOTTOM_MAX_STRETCH
+        if needed > final_box[3]:
+            widened = min(int(round(min(needed, limit))), CANVAS_HEIGHT)
+            logger.info(
+                "crop: 눈썹 아래 여백 확보 %d -> %d (필요 %d)", final_box[3], widened, int(needed)
+            )
+            final_box = (final_box[0], final_box[1], final_box[2], widened)
 
     logger.info("crop: before=%s after=%s -> using=%s (canvas=%dx%d)", before_box, after_box, final_box, CANVAS_WIDTH, CANVAS_HEIGHT)
     aligned_before, before_canonical_points = _crop_to_box(aligned_before, before_canonical_points, final_box)
