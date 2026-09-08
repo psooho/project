@@ -442,14 +442,15 @@ def _match_color(
     target: np.ndarray,
     target_mask: np.ndarray,
     match_contrast: bool = True,
-    match_brightness: bool = True,
-    match_tone: bool = True,
+    brightness_strength: float = 1.0,
+    tone_strength: float = 1.0,
 ) -> np.ndarray:
     """target의 밝기/색감을 reference(기본값: 전 사진)에 맞춘다 (PRD 6.4).
     얼굴 영역만으로 통계를 내어, 캔버스 여백(흰색 패딩)이 통계를 왜곡하지 않게 한다.
-    match_brightness/match_tone으로 밝기(L)와 색감(a·b)을 따로 끌 수 있다. 보정이 원본과
-    너무 달라 보일 때 사용자가 한쪽만 되돌릴 수 있게 하기 위한 것이다. LAB 색공간이라
-    밝기와 색이 애초에 분리돼 있어서, 해당 채널을 건너뛰기만 하면 원본 그대로 남는다.
+    brightness_strength/tone_strength로 밝기(L)와 색감(a·b) 보정의 세기를 따로 정한다.
+    0이면 원본 그대로, 1이면 완전히 맞추고, 그 사이는 비례해서 섞는다. 보정이 원본과 너무
+    달라 보일 때 끄고 켜는 것만으로는 거칠어서, 중간 세기를 고를 수 있게 열어뒀다.
+    LAB 색공간이라 밝기와 색이 애초에 분리돼 있어 서로 간섭하지 않는다.
 
     match_contrast=False면 평균만 맞추고 표준편차(대비)는 건드리지 않는다. 통계 범위가
     전/후에서 정확히 같은 부위라는 보장이 없는 수동 2점 모드용이다 — 표준편차까지 맞추면
@@ -460,7 +461,8 @@ def _match_color(
 
     for channel in range(3):
         # LAB의 0번은 밝기(L), 1·2번은 색감(a·b)이다.
-        if not (match_brightness if channel == 0 else match_tone):
+        strength = brightness_strength if channel == 0 else tone_strength
+        if strength <= 0:
             continue
         reference_values = reference_lab[:, :, channel][reference_mask > 0]
         target_values = target_lab[:, :, channel][target_mask > 0]
@@ -472,7 +474,11 @@ def _match_color(
         gain = reference_std / target_std if match_contrast else 1.0
 
         channel_data = target_lab[:, :, channel]
-        result_lab[:, :, channel] = (channel_data - target_mean) * gain + reference_mean
+        adjusted = (channel_data - target_mean) * gain + reference_mean
+        # 세기 1은 예전 동작과 완전히 같아야 하므로 섞는 계산을 거치지 않는다.
+        result_lab[:, :, channel] = (
+            adjusted if strength == 1.0 else channel_data + (adjusted - channel_data) * strength
+        )
 
     result_lab = np.clip(result_lab, 0, 255).astype(np.uint8)
     return cv2.cvtColor(result_lab, cv2.COLOR_LAB2BGR)
@@ -573,8 +579,8 @@ def process_pair(
     manual_points: tuple[ManualPoints, ManualPoints] | None = None,
     scale_adjust: float = 1.0,
     level_points: bool = False,
-    match_brightness: bool = True,
-    match_tone: bool = True,
+    brightness_strength: float = 1.0,
+    tone_strength: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """전/후 사진을 같은 크기·각도·밝기로 맞춘다.
 
@@ -582,8 +588,8 @@ def process_pair(
     클로즈업처럼 눈·코·입이 프레임 밖이라 얼굴 검출이 원리적으로 불가능한 사진용이다.
     찍은 순서가 전/후의 대응 관계이므로 개수가 같아야 하고, 한쪽만 받지는 않는다.
 
-    match_brightness/match_tone을 끄면 후 사진의 밝기 또는 색감을 전 사진에 맞추지 않고
-    원본 그대로 둔다.
+    brightness_strength/tone_strength는 밝기·색감 보정의 세기다 (0이면 원본, 1이면 완전히
+    맞춤).
 
     level_points는 기준점들을 잇는 선을 수평으로 맞출지 여부다. 눈썹 위치를 자동으로 찾은
     경우처럼 그 점들이 무엇인지 알 때만 켠다.
@@ -752,8 +758,8 @@ def process_pair(
         aligned_after,
         after_color_mask,
         match_contrast=manual_points is None,
-        match_brightness=match_brightness,
-        match_tone=match_tone,
+        brightness_strength=brightness_strength,
+        tone_strength=tone_strength,
     )
 
     if apply_mosaic:

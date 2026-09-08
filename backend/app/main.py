@@ -109,6 +109,8 @@ MAX_MANUAL_POINTS = 6
 # 문제가 아니라 기준점이나 사진 자체를 다시 봐야 한다.
 MIN_SCALE_ADJUST = 0.6
 MAX_SCALE_ADJUST = 1.6
+# 밝기·색감 보정 세기의 허용 범위. 0이면 원본, 1이면 완전히 맞춤, 그 이상은 과보정이다.
+MAX_MATCH_STRENGTH = 1.5
 
 
 def _parse_manual_points(raw: str) -> tuple[list, list] | None:
@@ -150,10 +152,16 @@ async def process(
     points: str = Form(""),
     scale_adjust: float = Form(1.0),
     level: bool = Form(False),
-    match_brightness: bool = Form(True),
-    match_tone: bool = Form(True),
+    brightness_strength: float = Form(1.0),
+    tone_strength: float = Form(1.0),
 ) -> dict:
     manual_points = _parse_manual_points(points)
+    for name, value in (("밝기", brightness_strength), ("색감", tone_strength)):
+        if not 0.0 <= value <= MAX_MATCH_STRENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{name} 보정 세기는 0~{MAX_MATCH_STRENGTH:.0%} 사이여야 합니다.",
+            )
     if not MIN_SCALE_ADJUST <= scale_adjust <= MAX_SCALE_ADJUST:
         raise HTTPException(
             status_code=400,
@@ -170,8 +178,8 @@ async def process(
         manual_points,
         scale_adjust,
         level,
-        match_brightness,
-        match_tone,
+        brightness_strength,
+        tone_strength,
     )
 
     return {

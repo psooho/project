@@ -56,6 +56,11 @@ const SCALE_STEP = 0.02;
 const SCALE_MIN = 0.6;
 const SCALE_MAX = 1.6;
 
+/** 밝기·색감 보정 세기. 0이면 원본, 100%면 전 사진에 완전히 맞춘다. */
+const MATCH_STEP = 0.1;
+const MATCH_MIN = 0;
+const MATCH_MAX = 1.5;
+
 async function processPair(
   before: File,
   after: File,
@@ -63,8 +68,8 @@ async function processPair(
   manual?: ManualPoints,
   scaleAdjust = 1,
   level = false,
-  matchBrightness = true,
-  matchTone = true,
+  brightnessStrength = 1,
+  toneStrength = 1,
 ): Promise<Results> {
   const formData = new FormData();
   formData.append("before", before);
@@ -74,8 +79,8 @@ async function processPair(
   // 자동으로 찾은 점은 눈썹인 걸 알기 때문에 그 선을 수평으로 맞춘다. 직접 찍은 점은
   // 무엇인지 알 수 없어 방향을 강제하지 않는다.
   formData.append("level", String(level));
-  formData.append("match_brightness", String(matchBrightness));
-  formData.append("match_tone", String(matchTone));
+  formData.append("brightness_strength", String(brightnessStrength));
+  formData.append("tone_strength", String(toneStrength));
   if (manual) {
     formData.append(
       "points",
@@ -211,8 +216,8 @@ function App() {
   // 눈썹을 자동으로 찾아 맞춘 결과인지. 사용자가 그 사실을 알아야 검토할 수 있다.
   const [autoAligned, setAutoAligned] = useState(false);
   const [autoLabels, setAutoLabels] = useState<string[]>([]);
-  const [matchBrightness, setMatchBrightness] = useState(true);
-  const [matchTone, setMatchTone] = useState(true);
+  const [brightnessStrength, setBrightnessStrength] = useState(1);
+  const [toneStrength, setToneStrength] = useState(1);
   const [toneBusy, setToneBusy] = useState(false);
   const [scaleAdjust, setScaleAdjust] = useState(1);
   const [scaleBusy, setScaleBusy] = useState(false);
@@ -259,8 +264,8 @@ function App() {
     setUsedManual(false);
     setAutoAligned(false);
     setScaleAdjust(1);
-    setMatchBrightness(true);
-    setMatchTone(true);
+    setBrightnessStrength(1);
+    setToneStrength(1);
     setLastPoints(undefined);
     setSuggestedPoints(null);
     setSuggestedLevel(false);
@@ -322,7 +327,8 @@ function App() {
     setSuggestFailed(false);
     try {
       const first = await processPair(
-        beforePhoto, afterPhoto, false, manual, 1, isSuggested(manual), matchBrightness, matchTone,
+        beforePhoto, afterPhoto, false, manual, 1, isSuggested(manual),
+        brightnessStrength, toneStrength,
       );
 
       // 얼굴을 못 찾았으면 눈썹 위치를 자동으로 받아 한 번 더 맞춰본다. 사용자가 점을
@@ -338,7 +344,7 @@ function App() {
               points,
               result: await processPair(
                 beforePhoto, afterPhoto, false, points, 1, suggested.level,
-                matchBrightness, matchTone,
+                brightnessStrength, toneStrength,
               ),
             };
             setSuggestedPoints(points);
@@ -407,7 +413,7 @@ function App() {
     try {
       const processed = await processPair(
         beforePhoto, afterPhoto, true, lastPoints, scaleAdjust, isSuggested(lastPoints),
-        matchBrightness, matchTone,
+        brightnessStrength, toneStrength,
       );
       setMosaicResult(toResultSet(processed));
       setShowingMosaic(true);
@@ -429,7 +435,7 @@ function App() {
     try {
       const processed = await processPair(
         beforePhoto, afterPhoto, false, lastPoints, next, isSuggested(lastPoints),
-        matchBrightness, matchTone,
+        brightnessStrength, toneStrength,
       );
       revokeResultSet(baseResult);
       revokeResultSet(mosaicResult);
@@ -446,11 +452,14 @@ function App() {
     }
   }
 
-  /** 밝기 또는 색감 보정만 켜고 끈다. 정렬은 그대로 두고 색 처리만 다시 계산한다. */
-  async function handleToneToggle(next: { brightness?: boolean; tone?: boolean }) {
+  /** 밝기 또는 색감 보정 세기를 한 단계 바꾼다. 정렬은 그대로 두고 색 처리만 다시 계산한다. */
+  async function handleMatchAdjust(kind: "brightness" | "tone", delta: number) {
     if (!beforePhoto || !afterPhoto || status !== "done" || toneBusy) return;
-    const brightness = next.brightness ?? matchBrightness;
-    const tone = next.tone ?? matchTone;
+    const current = kind === "brightness" ? brightnessStrength : toneStrength;
+    const next = Math.round((current + delta) * 100) / 100;
+    if (next < MATCH_MIN || next > MATCH_MAX) return;
+    const brightness = kind === "brightness" ? next : brightnessStrength;
+    const tone = kind === "tone" ? next : toneStrength;
     setToneBusy(true);
     setError(null);
     try {
@@ -464,8 +473,8 @@ function App() {
       setMosaicResult(null);
       setShowingMosaic(false);
       setMosaicStatus("idle");
-      setMatchBrightness(brightness);
-      setMatchTone(tone);
+      setBrightnessStrength(brightness);
+      setToneStrength(tone);
       clearGif();
     } catch {
       setError("보정 변경에 실패했습니다. 다시 시도해주세요.");
@@ -645,30 +654,53 @@ function App() {
         </section>
       )}
 
-      {status === "done" && (
-        <div className="scale-control">
-          <span className="scale-label">보정</span>
-          <button
-            type="button"
-            className={`toggle-btn${matchBrightness ? " toggle-btn--on" : ""}`}
-            disabled={toneBusy}
-            onClick={() => handleToneToggle({ brightness: !matchBrightness })}
-          >
-            밝기 {matchBrightness ? "맞춤" : "원본"}
-          </button>
-          <button
-            type="button"
-            className={`toggle-btn${matchTone ? " toggle-btn--on" : ""}`}
-            disabled={toneBusy}
-            onClick={() => handleToneToggle({ tone: !matchTone })}
-          >
-            색감 {matchTone ? "맞춤" : "원본"}
-          </button>
-          <span className="scale-hint">
-            {toneBusy ? "다시 계산 중..." : "너무 달라 보이면 눌러서 원본으로 되돌리세요"}
-          </span>
-        </div>
-      )}
+      {status === "done" &&
+        (
+          [
+            ["밝기", brightnessStrength, "brightness"],
+            ["색감", toneStrength, "tone"],
+          ] as const
+        ).map(([label, value, kind]) => (
+          <div className="scale-control" key={kind}>
+            <span className="scale-label">{label} 보정</span>
+            <button
+              type="button"
+              className="scale-btn"
+              disabled={toneBusy || value - MATCH_STEP < MATCH_MIN}
+              onClick={() => handleMatchAdjust(kind, -MATCH_STEP)}
+            >
+              −
+            </button>
+            <span className={`scale-value${value !== 1 ? " scale-value--changed" : ""}`}>
+              {toneBusy ? "..." : `${Math.round(value * 100)}%`}
+            </span>
+            <button
+              type="button"
+              className="scale-btn"
+              disabled={toneBusy || value + MATCH_STEP > MATCH_MAX}
+              onClick={() => handleMatchAdjust(kind, MATCH_STEP)}
+            >
+              +
+            </button>
+            {value !== 1 && (
+              <button
+                type="button"
+                className="scale-reset"
+                disabled={toneBusy}
+                onClick={() => handleMatchAdjust(kind, 1 - value)}
+              >
+                되돌리기
+              </button>
+            )}
+            <span className="scale-hint">
+              {value === 0
+                ? "원본 그대로"
+                : value === 1
+                  ? "전 사진에 맞춤 (0%로 낮추면 원본)"
+                  : `보정 ${Math.round(value * 100)}%만 적용`}
+            </span>
+          </div>
+        ))}
 
       {status === "done" && (
         <div className="scale-control">
