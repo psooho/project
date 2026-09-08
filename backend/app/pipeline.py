@@ -276,6 +276,13 @@ def _manual_transforms(
     return base, _compose(base, after_to_before), residual
 
 
+def _scale_about(pivot: np.ndarray, factor: float) -> np.ndarray:
+    """pivot을 고정한 채 factor배로 키우거나 줄이는 변환."""
+    linear = float(factor) * np.eye(2)
+    offset = np.asarray(pivot, dtype=np.float64) * (1.0 - float(factor))
+    return np.hstack([linear, offset.reshape(2, 1)]).astype(np.float32)
+
+
 def _compose(outer: np.ndarray, inner: np.ndarray) -> np.ndarray:
     """두 어파인 변환을 잇는다 (inner를 적용한 뒤 outer)."""
     stacked = np.vstack([outer, [0, 0, 1]]) @ np.vstack([inner, [0, 0, 1]])
@@ -535,12 +542,18 @@ def process_pair(
     after_bgr: np.ndarray,
     apply_mosaic: bool = False,
     manual_points: tuple[ManualPoints, ManualPoints] | None = None,
+    scale_adjust: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """전/후 사진을 같은 크기·각도·밝기로 맞춘다.
 
     manual_points를 주면 얼굴 검출을 건너뛰고 그 점들을 정렬 기준으로 쓴다. 이마·헤어라인
     클로즈업처럼 눈·코·입이 프레임 밖이라 얼굴 검출이 원리적으로 불가능한 사진용이다.
-    찍은 순서가 전/후의 대응 관계이므로 개수가 같아야 하고, 한쪽만 받지는 않는다."""
+    찍은 순서가 전/후의 대응 관계이므로 개수가 같아야 하고, 한쪽만 받지는 않는다.
+
+    scale_adjust는 후 사진만 그만큼 더 키우거나 줄인다. 두 사진의 고개 각도가 다르면
+    2D 변환으로는 어떤 기준점을 써도 한쪽이 틀어진다 — 눈썹을 맞추면 두상이 안 맞고
+    두상을 맞추면 눈썹이 안 맞는다(실측: 같은 두 장에서 가로 기준 1.12배, 세로 기준
+    0.89배). 자동으로 정할 수 없는 값이라 사람이 보고 미세조정할 수 있게 열어둔다."""
     warnings: list[str] = []
 
     if manual_points is not None:
@@ -558,6 +571,10 @@ def process_pair(
                 "전/후 사진의 기준점이 서로 잘 맞지 않습니다. 같은 자리를 찍었는지 확인해주세요."
             )
         logger.info("manual: %d points, residual=%.1fpx (spread=%.1fpx)", len(before_anchors), residual, spread)
+        # 미세조정은 정렬된 기준점 자리를 중심으로 한다 — 그래야 크기만 변하고 위치는 그대로다.
+        alignment_pivot = _apply_transform(
+            before_anchors.mean(axis=0).reshape(1, 2), before_transform
+        )[0].astype(np.float64)
         if apply_mosaic:
             warnings.append(
                 "직접 지정 모드에서는 얼굴 위치를 알 수 없어 모자이크를 적용하지 않았습니다."
@@ -576,6 +593,11 @@ def process_pair(
 
         before_transform = _brow_transform(before_points)
         after_transform = _brow_transform(after_points)
+        alignment_pivot = np.array(CROP_ANCHOR, dtype=np.float64)
+
+    if abs(scale_adjust - 1.0) > 1e-6:
+        after_transform = _compose(_scale_about(alignment_pivot, scale_adjust), after_transform)
+        logger.info("scale adjust: after x%.3f", scale_adjust)
 
     aligned_before, before_canonical_points, before_valid_mask, before_warning = _align_to_canonical(
         before_bgr, before_transform, before_points

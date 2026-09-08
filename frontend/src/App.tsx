@@ -50,16 +50,24 @@ function isFaceMissing(warnings: string[]) {
   return warnings.some((warning) => warning.includes("얼굴을 찾지 못해"));
 }
 
+/** 후 사진 크기 미세조정. 두 사진의 고개 각도가 다르면 2D 변환으로는 어떤 기준점을 써도
+ *  한쪽이 틀어지므로, 마지막은 사람 눈으로 맞춘다. */
+const SCALE_STEP = 0.02;
+const SCALE_MIN = 0.6;
+const SCALE_MAX = 1.6;
+
 async function processPair(
   before: File,
   after: File,
   mosaic: boolean,
   manual?: ManualPoints,
+  scaleAdjust = 1,
 ): Promise<Results> {
   const formData = new FormData();
   formData.append("before", before);
   formData.append("after", after);
   formData.append("mosaic", String(mosaic));
+  formData.append("scale_adjust", String(scaleAdjust));
   if (manual) {
     formData.append(
       "points",
@@ -193,6 +201,11 @@ function App() {
   // 눈썹을 자동으로 찾아 맞춘 결과인지. 사용자가 그 사실을 알아야 검토할 수 있다.
   const [autoAligned, setAutoAligned] = useState(false);
   const [autoLabels, setAutoLabels] = useState<string[]>([]);
+  const [scaleAdjust, setScaleAdjust] = useState(1);
+  const [scaleBusy, setScaleBusy] = useState(false);
+  // 지금 화면의 결과를 만들 때 쓴 기준점. 크기만 조정할 때 다시 찾지 않고 그대로 쓴다
+  // (자동 탐색은 15~20초가 걸리고 호출 요금도 든다).
+  const [lastPoints, setLastPoints] = useState<ManualPoints | undefined>(undefined);
 
   const displayed = showingMosaic && mosaicResult ? mosaicResult : baseResult;
 
@@ -216,6 +229,8 @@ function App() {
     setMosaicStatus("idle");
     setUsedManual(false);
     setAutoAligned(false);
+    setScaleAdjust(1);
+    setLastPoints(undefined);
     clearGif();
   }
 
@@ -326,6 +341,8 @@ function App() {
       setMosaicStatus("idle");
       setUsedManual(Boolean(points));
       setAutoAligned(Boolean(auto));
+      setLastPoints(points);
+      setScaleAdjust(1);
       if (!auto) setAutoLabels([]);
       clearGif();
       setStatus("done");
@@ -348,7 +365,7 @@ function App() {
     setMosaicStatus("processing");
     setError(null);
     try {
-      const processed = await processPair(beforePhoto, afterPhoto, true);
+      const processed = await processPair(beforePhoto, afterPhoto, true, lastPoints, scaleAdjust);
       setMosaicResult(toResultSet(processed));
       setShowingMosaic(true);
       clearGif();
@@ -356,6 +373,30 @@ function App() {
     } catch {
       setError("모자이크 처리 중 문제가 발생했습니다. 다시 시도해주세요.");
       setMosaicStatus("idle");
+    }
+  }
+
+  /** 후 사진만 조금 키우거나 줄인다. 기준점은 그대로 두고 배율만 바꿔 다시 계산한다. */
+  async function handleScaleAdjust(delta: number) {
+    if (!beforePhoto || !afterPhoto || status !== "done" || scaleBusy) return;
+    const next = Math.round((scaleAdjust + delta) * 100) / 100;
+    if (next < SCALE_MIN || next > SCALE_MAX) return;
+    setScaleBusy(true);
+    setError(null);
+    try {
+      const processed = await processPair(beforePhoto, afterPhoto, false, lastPoints, next);
+      revokeResultSet(baseResult);
+      revokeResultSet(mosaicResult);
+      setBaseResult(toResultSet(processed));
+      setMosaicResult(null);
+      setShowingMosaic(false);
+      setMosaicStatus("idle");
+      setScaleAdjust(next);
+      clearGif();
+    } catch {
+      setError("크기 조정에 실패했습니다. 다시 시도해주세요.");
+    } finally {
+      setScaleBusy(false);
     }
   }
 
@@ -528,6 +569,44 @@ function App() {
             </button>
           </div>
         </section>
+      )}
+
+      {status === "done" && (
+        <div className="scale-control">
+          <span className="scale-label">후 사진 크기</span>
+          <button
+            type="button"
+            className="scale-btn"
+            disabled={scaleBusy || scaleAdjust - SCALE_STEP < SCALE_MIN}
+            onClick={() => handleScaleAdjust(-SCALE_STEP)}
+          >
+            −
+          </button>
+          <span className={`scale-value${scaleAdjust !== 1 ? " scale-value--changed" : ""}`}>
+            {scaleBusy ? "..." : `${Math.round(scaleAdjust * 100)}%`}
+          </span>
+          <button
+            type="button"
+            className="scale-btn"
+            disabled={scaleBusy || scaleAdjust + SCALE_STEP > SCALE_MAX}
+            onClick={() => handleScaleAdjust(SCALE_STEP)}
+          >
+            +
+          </button>
+          {scaleAdjust !== 1 && (
+            <button
+              type="button"
+              className="scale-reset"
+              disabled={scaleBusy}
+              onClick={() => handleScaleAdjust(1 - scaleAdjust)}
+            >
+              되돌리기
+            </button>
+          )}
+          <span className="scale-hint">
+            두상 크기가 안 맞으면 눌러서 맞춰주세요 (2%씩)
+          </span>
+        </div>
       )}
 
       <div className="actions">

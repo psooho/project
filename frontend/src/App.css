@@ -423,3 +423,69 @@
 .auto-banner p {
   margin: 0;
 }
+
+/* --- 후 사진 크기 미세조정 ------------------------------------------------ */
+.scale-control {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+  padding: 0.6rem 0.85rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.scale-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.scale-btn {
+  width: 30px;
+  height: 30px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 1.05rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.scale-btn:hover:not(:disabled) {
+  border-color: #9ca3af;
+}
+
+.scale-btn:disabled {
+  color: #d1d5db;
+  cursor: not-allowed;
+}
+
+.scale-value {
+  min-width: 3.2rem;
+  text-align: center;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.scale-value--changed {
+  font-weight: 700;
+  color: #2563eb;
+}
+
+.scale-reset {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 0.8rem;
+  color: #6b7280;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.scale-hint {
+  color: #9ca3af;
+  font-size: 0.78rem;
+}

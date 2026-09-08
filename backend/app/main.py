@@ -105,6 +105,10 @@ def auth_status(x_app_password: str = Header(default="")) -> dict[str, bool]:
 MIN_MANUAL_SPREAD = 0.05
 # 점을 더 찍을수록 정확해지지만 이 이상은 실익이 없고 화면만 복잡해진다.
 MAX_MANUAL_POINTS = 6
+# 후 사진 크기 미세조정의 허용 범위. 이 밖으로 나갈 만큼 어긋났다면 미세조정으로 덮을
+# 문제가 아니라 기준점이나 사진 자체를 다시 봐야 한다.
+MIN_SCALE_ADJUST = 0.6
+MAX_SCALE_ADJUST = 1.6
 
 
 def _parse_manual_points(raw: str) -> tuple[list, list] | None:
@@ -144,13 +148,19 @@ async def process(
     after: UploadFile = File(...),
     mosaic: bool = Form(False),
     points: str = Form(""),
+    scale_adjust: float = Form(1.0),
 ) -> dict:
     manual_points = _parse_manual_points(points)
+    if not MIN_SCALE_ADJUST <= scale_adjust <= MAX_SCALE_ADJUST:
+        raise HTTPException(
+            status_code=400,
+            detail=f"크기 조정은 {MIN_SCALE_ADJUST:.0%}~{MAX_SCALE_ADJUST:.0%} 사이여야 합니다.",
+        )
     before_bgr = _upload_to_bgr(await before.read())
     after_bgr = _upload_to_bgr(await after.read())
 
     result_before, result_after, warnings = await run_in_threadpool(
-        process_pair, before_bgr, after_bgr, mosaic, manual_points
+        process_pair, before_bgr, after_bgr, mosaic, manual_points, scale_adjust
     )
 
     return {
