@@ -174,6 +174,8 @@ function App() {
   const [preManualResult, setPreManualResult] = useState<ResultSet | null>(null);
   const [suggesting, setSuggesting] = useState(false);
   const [suggestFailed, setSuggestFailed] = useState(false);
+  // 눈썹을 자동으로 찾아 맞춘 결과인지. 사용자가 그 사실을 알아야 검토할 수 있다.
+  const [autoAligned, setAutoAligned] = useState(false);
 
   const displayed = showingMosaic && mosaicResult ? mosaicResult : baseResult;
 
@@ -196,6 +198,7 @@ function App() {
     setShowingMosaic(false);
     setMosaicStatus("idle");
     setUsedManual(false);
+    setAutoAligned(false);
     clearGif();
   }
 
@@ -249,9 +252,44 @@ function App() {
     if (!beforePhoto || !afterPhoto) return;
     setStatus("processing");
     setError(null);
+    setSuggestFailed(false);
     try {
-      const processed = await processPair(beforePhoto, afterPhoto, false, manual);
-      if (manual) {
+      const first = await processPair(beforePhoto, afterPhoto, false, manual);
+
+      // 얼굴을 못 찾았으면 눈썹 위치를 자동으로 받아 한 번 더 맞춰본다. 사용자가 점을
+      // 찍지 않아도 변환 한 번으로 끝나고, 결과가 어긋나면 "변환 취소"로 고칠 수 있다.
+      let auto: { points: ManualPoints; result: Results } | null = null;
+      if (!manual && isFaceMissing(first.warnings)) {
+        setSuggesting(true);
+        try {
+          const suggested = await fetchSuggestedPoints(beforePhoto, afterPhoto);
+          if (suggested) {
+            auto = {
+              points: suggested,
+              result: await processPair(beforePhoto, afterPhoto, false, suggested),
+            };
+          } else {
+            setSuggestFailed(true);
+          }
+        } catch {
+          setSuggestFailed(true);
+        } finally {
+          setSuggesting(false);
+        }
+      }
+
+      const shown = auto ? auto.result : first;
+      const points = manual ?? auto?.points;
+
+      revokeResultSet(mosaicResult);
+      if (auto) {
+        // 되돌리면 방금의 "얼굴 못 찾음" 상태로 돌아간다.
+        revokeResultSet(baseResult);
+        revokeResultSet(preManualResult);
+        setPreManualResult(toResultSet(first));
+        setBeforePoints(auto.points.before);
+        setAfterPoints(auto.points.after);
+      } else if (manual) {
         // 되돌릴 수 있도록 직전 결과는 해제하지 않고 보관한다.
         revokeResultSet(preManualResult);
         setPreManualResult(baseResult);
@@ -260,16 +298,17 @@ function App() {
         revokeResultSet(preManualResult);
         setPreManualResult(null);
       }
-      revokeResultSet(mosaicResult);
-      setBaseResult(toResultSet(processed));
+
+      setBaseResult(toResultSet(shown));
       setMosaicResult(null);
       setShowingMosaic(false);
       setMosaicStatus("idle");
-      setUsedManual(Boolean(manual));
+      setUsedManual(Boolean(points));
+      setAutoAligned(Boolean(auto));
       clearGif();
       setStatus("done");
-      if (manual) setPicking(false);
-      else if (!isFaceMissing(processed.warnings)) resetPicking();
+      if (points) setPicking(false);
+      else if (!isFaceMissing(shown.warnings)) resetPicking();
     } catch {
       setError("변환 중 문제가 발생했습니다. 다시 시도해주세요.");
       setStatus("idle");
@@ -309,6 +348,7 @@ function App() {
     setShowingMosaic(false);
     setMosaicStatus("idle");
     setUsedManual(false);
+    setAutoAligned(false);
     clearGif();
     setPicking(true);
   }
@@ -383,6 +423,15 @@ function App() {
             실제로 저장되는 파일입니다 ({Math.round(gifResult.blob.size / 1024).toLocaleString()}KB)
           </p>
         </section>
+      )}
+
+      {autoAligned && !picking && (
+        <div className="auto-banner">
+          <p>
+            얼굴을 찾지 못해 <strong>눈썹 위치를 자동으로 찾아</strong> 크기와 각도를 맞췄습니다.
+            결과를 확인해주세요 — 어긋났으면 <strong>변환 취소</strong>를 눌러 직접 고칠 수 있습니다.
+          </p>
+        </div>
       )}
 
       {displayed && displayed.results.warnings.length > 0 && (
@@ -495,7 +544,7 @@ function App() {
           </>
         ) : (
           <button type="button" className="submit-btn" disabled={!canTransform} onClick={() => handleTransform()}>
-            {status === "processing" ? "처리 중..." : "사진 변환"}
+            {suggesting ? "눈썹 위치를 찾는 중..." : status === "processing" ? "처리 중..." : "사진 변환"}
           </button>
         )}
         {error && <span className="error-note">{error}</span>}

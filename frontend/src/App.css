@@ -408,3 +408,18 @@
   background: #ecfdf5;
   color: #065f46;
 }
+
+.auto-banner {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1.25rem;
+  color: #065f46;
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+
+.auto-banner p {
+  margin: 0;
+}
