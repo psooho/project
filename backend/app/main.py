@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import logging
@@ -16,6 +17,7 @@ from PIL import Image, ImageOps
 
 from .animation import build_crossfade_gif
 from .pipeline import process_pair
+from .suggest import is_available as suggest_available, suggest_brow_points
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("app")
@@ -156,6 +158,29 @@ async def process(
         "before": _bgr_to_data_url(result_before),
         "after": _bgr_to_data_url(result_after),
         "warnings": warnings,
+    }
+
+
+@app.post("/api/suggest-points", dependencies=[Depends(require_password)])
+async def suggest_points(before: UploadFile = File(...), after: UploadFile = File(...)) -> dict:
+    """전/후 사진에서 눈썹 양 끝 위치를 제안한다 (얼굴 검출이 실패했을 때의 출발점).
+
+    어디까지나 제안이라 실패해도 오류로 처리하지 않는다 — 화면은 빈 상태로 두고 사용자가
+    직접 찍으면 된다. 그래서 available=false나 points=null도 정상 응답이다."""
+    if not suggest_available():
+        return {"available": False, "before": None, "after": None}
+
+    before_bytes = await before.read()
+    after_bytes = await after.read()
+    # 두 장을 동시에 처리한다 — 순서대로 하면 사용자가 두 배로 기다린다.
+    before_points, after_points = await asyncio.gather(
+        run_in_threadpool(suggest_brow_points, before_bytes),
+        run_in_threadpool(suggest_brow_points, after_bytes),
+    )
+    return {
+        "available": True,
+        "before": before_points,
+        "after": after_points,
     }
 
 

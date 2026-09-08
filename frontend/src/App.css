@@ -393,3 +393,18 @@
   text-decoration: underline;
   cursor: pointer;
 }
+
+.picker-notice {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.85rem;
+  border-radius: 8px;
+  background: #f3f4f6;
+  color: #4b5563;
+  font-size: 0.83rem;
+  line-height: 1.55;
+}
+
+.picker-notice--ok {
+  background: #ecfdf5;
+  color: #065f46;
+}

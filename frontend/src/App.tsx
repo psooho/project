@@ -91,6 +91,28 @@ async function processPair(
   return { before: beforeBlob, after: afterBlob, warnings: data.warnings ?? [] };
 }
 
+/** 얼굴 검출이 안 되는 사진에서 눈썹 양 끝 위치를 제안받는다.
+ *  실패해도 오류로 다루지 않는다 — 제안이 없으면 사용자가 직접 찍으면 된다. */
+async function fetchSuggestedPoints(before: File, after: File) {
+  const formData = new FormData();
+  formData.append("before", before);
+  formData.append("after", after);
+  const res = await fetch(`${API_BASE_URL}/api/suggest-points`, {
+    method: "POST",
+    headers: { "X-App-Password": getStoredPassword() },
+    body: formData,
+  });
+  if (!res.ok) return null;
+  const data: {
+    available: boolean;
+    before: [number, number][] | null;
+    after: [number, number][] | null;
+  } = await res.json();
+  if (!data.available || !data.before || !data.after) return null;
+  const toPoints = (pairs: [number, number][]) => pairs.map(([x, y]) => ({ x, y }));
+  return { before: toPoints(data.before), after: toPoints(data.after) };
+}
+
 /** 이미 변환이 끝난 두 장을 보내서 전→후로 스르륵 넘어가는 GIF를 받아온다. */
 async function buildGif(before: Blob, after: Blob): Promise<Blob> {
   const formData = new FormData();
@@ -150,6 +172,8 @@ function App() {
   const [usedManual, setUsedManual] = useState(false);
   // 직접 지정으로 변환하기 직전의 결과. "변환 취소"로 되돌릴 수 있게 들고 있는다.
   const [preManualResult, setPreManualResult] = useState<ResultSet | null>(null);
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestFailed, setSuggestFailed] = useState(false);
 
   const displayed = showingMosaic && mosaicResult ? mosaicResult : baseResult;
 
@@ -179,6 +203,30 @@ function App() {
     setPicking(false);
     setBeforePoints([]);
     setAfterPoints([]);
+    setSuggestFailed(false);
+  }
+
+  /** 찍기 화면을 열면서 눈썹 위치를 미리 채워둔다. 사용자는 확인하고 고치기만 하면 된다. */
+  async function handleStartPicking() {
+    setPicking(true);
+    setSuggestFailed(false);
+    if (!beforePhoto || !afterPhoto) return;
+    // 이미 찍어둔 점이 있으면(변환 취소로 돌아온 경우) 덮어쓰지 않는다.
+    if (beforePoints.length || afterPoints.length) return;
+    setSuggesting(true);
+    try {
+      const suggested = await fetchSuggestedPoints(beforePhoto, afterPhoto);
+      if (suggested) {
+        setBeforePoints(suggested.before);
+        setAfterPoints(suggested.after);
+      } else {
+        setSuggestFailed(true);
+      }
+    } catch {
+      setSuggestFailed(true);
+    } finally {
+      setSuggesting(false);
+    }
   }
 
   function handleBeforeChange(file: File | null) {
@@ -346,7 +394,7 @@ function App() {
             <p className="warning-action">
               이마·헤어라인만 크게 찍은 사진은 눈·코·입이 없어 얼굴을 자동으로 찾을 수 없습니다.
               기준점을 직접 찍으면 맞출 수 있습니다.{" "}
-              <button type="button" className="link-btn" onClick={() => setPicking(true)}>
+              <button type="button" className="link-btn" onClick={handleStartPicking}>
                 직접 찍기
               </button>
             </p>
@@ -356,7 +404,19 @@ function App() {
 
       {picking && beforePhoto && afterPhoto && (
         <section className="picker-section">
-          <h2 className="picker-title">기준점 직접 지정</h2>
+          <h2 className="picker-title">기준점 지정</h2>
+          {suggesting && <p className="picker-notice">눈썹 위치를 찾는 중입니다...</p>}
+          {!suggesting && !suggestFailed && beforePoints.length > 0 && (
+            <p className="picker-notice picker-notice--ok">
+              눈썹 양 끝을 자동으로 찍어뒀습니다. <strong>맞는지 확인하고</strong> 어긋났으면
+              점을 눌러 지운 뒤 다시 찍어주세요.
+            </p>
+          )}
+          {suggestFailed && (
+            <p className="picker-notice">
+              눈썹 위치를 자동으로 찾지 못했습니다. 직접 찍어주세요.
+            </p>
+          )}
           <p className="picker-guide">
             두 사진에서 <strong>같은 자리</strong>를 <strong>같은 순서로</strong> 클릭해주세요.
             최소 2곳이면 되고, <strong>최대한 멀리 떨어진</strong> 지점을 고르는 게 가장 효과가
