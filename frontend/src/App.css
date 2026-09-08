@@ -264,3 +264,126 @@
   color: #dc2626;
   font-size: 0.85rem;
 }
+
+/* --- 기준점 직접 지정 --------------------------------------------------- */
+.warning-action {
+  margin-top: 0.5rem;
+  line-height: 1.55;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 600;
+  color: #92400e;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.picker-section {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.picker-title {
+  font-size: 1rem;
+  margin: 0 0 0.5rem;
+}
+
+.picker-guide {
+  margin: 0 0 1.25rem;
+  color: #6b7280;
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+
+.picker-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+  margin-bottom: 1.25rem;
+}
+
+@media (max-width: 560px) {
+  .picker-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.picker-label {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.picker-count {
+  font-size: 0.78rem;
+  color: #6b7280;
+}
+
+.picker-count--done {
+  color: #16a34a;
+  font-weight: 600;
+}
+
+/* 사진 자체가 클릭 판이므로 이미지 크기와 요소 크기가 정확히 같아야 한다.
+   object-fit으로 잘리면 클릭 좌표가 원본과 어긋나고, 이미지에 테두리를 주면 그 두께만큼
+   클릭 좌표가 밀린다. 그래서 테두리는 바깥(.picker-stage)에 둔다. */
+.picker-stage {
+  position: relative;
+  line-height: 0;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.picker-image {
+  width: 100%;
+  height: auto;
+  display: block;
+  cursor: crosshair;
+}
+
+.picker-dot {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border-radius: 50%;
+  background: #2563eb;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.picker-reset {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 0.8rem;
+  color: #6b7280;
+  text-decoration: underline;
+  cursor: pointer;
+}

@@ -75,6 +75,22 @@ FRONT_LIFT_DEG = 3.2
 # 회전 보정이 이 각도를 넘으면 정렬 신뢰도가 낮다고 보고 경고만 남긴다 (PRD 6.2).
 MAX_TRUSTED_ROTATION_DEG = 45.0
 
+# --- 수동 2점 모드 -----------------------------------------------------------
+# 이마·헤어라인만 크게 찍은 클로즈업은 눈·코·입이 프레임 밖이라 MediaPipe가 얼굴을
+# 아예 못 찾는다(실측: 이런 사진 16장 중 15장 실패, 검출 임계값을 0.01까지 낮추고
+# 여백을 덧대 재시도해도 마찬가지). 그럴 때 사용자가 두 사진에서 같은 지점 두 곳을
+# 직접 찍어주면, 정렬에 필요한 건 원래 점 두 개뿐이므로 나머지 처리는 그대로 돌아간다.
+
+# 회전 때문에 사진이 캔버스 밖으로 밀려나지 않도록 두는 여유.
+MANUAL_FIT_SAFETY = 0.95
+# 색 보정 통계를 낼 피부 픽셀의 YCrCb 범위. 자동 모드는 얼굴 윤곽 안쪽으로 범위를
+# 잡지만 수동 모드에는 윤곽이 없다. 프레임 전체를 쓰면 이식으로 늘어난 머리숱만큼
+# 후 사진이 어두워져, 그걸 상쇄하려고 엉뚱하게 밝아진다. 그래서 피부만 골라 쓴다.
+SKIN_YCRCB_LOW = (0, 133, 77)
+SKIN_YCRCB_HIGH = (255, 173, 127)
+# 피부로 잡힌 픽셀이 이 비율보다 적으면 신뢰할 수 없다고 보고 프레임 전체로 되돌린다.
+SKIN_MIN_COVERAGE = 0.05
+
 
 def _landmark_center(points: np.ndarray, indices: list[int]) -> np.ndarray:
     return points[indices].mean(axis=0)
@@ -87,7 +103,13 @@ def _screen_ordered_brows(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     돌아가는 정렬(상하 반전)을 막을 수 있다."""
     brow_a = _landmark_center(points, LEFT_EYEBROW_IDX)
     brow_b = _landmark_center(points, RIGHT_EYEBROW_IDX)
-    return (brow_a, brow_b) if brow_a[0] <= brow_b[0] else (brow_b, brow_a)
+    return _screen_ordered_pair(brow_a, brow_b)
+
+
+def _screen_ordered_pair(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """두 점을 화면상 왼쪽·오른쪽 순으로 놓는다. 수동 2점 모드에서도 같은 규칙을 써야
+    전/후 사진이 서로 뒤집혀 정렬되는 일이 없다."""
+    return (a, b) if a[0] <= b[0] else (b, a)
 
 
 def _front_is_right(points: np.ndarray) -> bool | None:
@@ -106,9 +128,12 @@ def _front_is_right(points: np.ndarray) -> bool | None:
     return right_reach < left_reach
 
 
-def _lift_front(transform: np.ndarray, points: np.ndarray) -> np.ndarray:
+def _lift_front(transform: np.ndarray, points: np.ndarray | None) -> np.ndarray:
     """앞쪽(코 방향)을 FRONT_LIFT_DEG만큼 들어올리도록 회전을 덧붙인다.
     getRotationMatrix2D의 양수 각도는 화면상 반시계 방향이라 오른쪽이 올라간다."""
+    if points is None:
+        # 수동 2점 모드: 얼굴 윤곽이 없어 앞/뒤를 판정할 수 없으므로 보정하지 않는다.
+        return transform
     front_is_right = _front_is_right(points)
     if front_is_right is None or FRONT_LIFT_DEG == 0:
         return transform
@@ -122,11 +147,15 @@ def _lift_front(transform: np.ndarray, points: np.ndarray) -> np.ndarray:
 
 
 def _align_to_canonical(
-    image_bgr: np.ndarray, points: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, str | None]:
-    screen_left_brow, screen_right_brow = _screen_ordered_brows(points)
-    src = np.array([screen_left_brow, screen_right_brow], dtype=np.float32)
-    dst = np.array([TARGET_LEFT_BROW, TARGET_RIGHT_BROW], dtype=np.float32)
+    image_bgr: np.ndarray,
+    anchors: np.ndarray,
+    targets: np.ndarray,
+    points: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray, str | None]:
+    """anchors(원본 사진의 기준점 2개)가 targets(캔버스 좌표 2개)에 놓이도록 회전·확대·
+    이동시킨다. points는 있으면 같이 변환해서 돌려주고, 없으면(수동 2점 모드) None."""
+    src = np.asarray(anchors, dtype=np.float32)
+    dst = np.asarray(targets, dtype=np.float32)
 
     transform, _ = cv2.estimateAffinePartial2D(src, dst)
     transform = _lift_front(transform, points)
@@ -134,7 +163,7 @@ def _align_to_canonical(
     warning = None
     rotation_deg = float(np.degrees(np.arctan2(transform[1, 0], transform[0, 0])))
     zoom_scale = float(np.hypot(transform[0, 0], transform[1, 0]))
-    source_interbrow_px = float(np.linalg.norm(screen_right_brow - screen_left_brow))
+    source_interbrow_px = float(np.linalg.norm(src[1] - src[0]))
     logger.info(
         "align: interbrow=%.1fpx rotation=%.1fdeg zoom=%.2fx", source_interbrow_px, rotation_deg, zoom_scale
     )
@@ -162,9 +191,60 @@ def _align_to_canonical(
         borderValue=0,
     )
 
-    ones = np.ones((points.shape[0], 1), dtype=np.float32)
-    aligned_points = np.hstack([points, ones]) @ transform.T
+    aligned_points = None if points is None else _apply_transform(points, transform)
     return aligned, aligned_points, valid_mask, warning
+
+
+def _apply_transform(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
+    ones = np.ones((points.shape[0], 1), dtype=np.float32)
+    return np.hstack([points.astype(np.float32), ones]) @ transform.T
+
+
+def _manual_targets(
+    anchor_pairs: list[np.ndarray], shapes: list[tuple[int, int]]
+) -> np.ndarray:
+    """수동 2점 모드에서 기준점 두 개가 놓일 캔버스 좌표를 정한다.
+
+    자동 모드는 두 눈썹을 항상 160px 간격에 놓지만, 수동 모드는 사용자가 어디를 찍을지
+    알 수 없다. 눈썹 양 끝처럼 멀리 떨어진 두 점을 찍었는데 그 간격을 160px로 줄여버리면
+    사진이 심하게 축소돼 결과물 해상도가 뭉개진다. 그래서 간격을 고정하지 않고 두 사진이
+    캔버스를 최대한 채우도록 역산한다 — 전/후가 서로 같은 배율·각도로 맞춰지는 성질은
+    그대로 유지되고, 해상도 손실만 없앤다."""
+    separations = [float(np.linalg.norm(pair[1] - pair[0])) for pair in anchor_pairs]
+    # 각 사진이 캔버스에 딱 들어가는 배율에서 역산한 간격 중 작은 쪽을 쓴다.
+    fit_scales = [min(CANVAS_WIDTH / w, CANVAS_HEIGHT / h) for h, w in shapes]
+    target_sep = min(f * s for f, s in zip(fit_scales, separations)) * MANUAL_FIT_SAFETY
+
+    canvas_center = np.array([CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2], dtype=np.float32)
+    half = np.array([target_sep / 2, 0.0], dtype=np.float32)
+    targets = np.array([canvas_center - half, canvas_center + half], dtype=np.float32)
+
+    # 기준점을 캔버스 한가운데 두면, 눈썹처럼 사진 아래쪽에 찍은 경우 위쪽(머리)이 캔버스
+    # 밖으로 밀려난다. 사진 중심이 캔버스 중심에 오도록 목표 좌표를 통째로 옮겨준다.
+    offsets = []
+    for pair, (h, w) in zip(anchor_pairs, shapes):
+        transform, _ = cv2.estimateAffinePartial2D(
+            np.asarray(pair, dtype=np.float32), targets
+        )
+        image_center = np.array([[w / 2, h / 2]], dtype=np.float32)
+        offsets.append(canvas_center - _apply_transform(image_center, transform)[0])
+    return (targets + np.mean(offsets, axis=0)).astype(np.float32)
+
+
+def _skin_mask(image_bgr: np.ndarray) -> np.ndarray:
+    """수동 2점 모드에서 색 보정 통계를 낼 피부 영역.
+
+    처음엔 기준점 주변 타원을 썼는데, 눈썹을 찍으면 타원이 사진 아래 가장자리에 걸쳐
+    좁은 영역만 잡히고 그 안의 색 분포가 전/후에서 크게 달라져 보정이 1.8배까지 증폭됐다
+    (결과물이 새파래짐). 피부는 전/후 모두 넓게 잡히고 이식으로 바뀌는 머리카락이
+    빠지므로 통계가 훨씬 안정적이다."""
+    ycrcb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2YCrCb)
+    mask = cv2.inRange(ycrcb, SKIN_YCRCB_LOW, SKIN_YCRCB_HIGH)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((9, 9), np.uint8))
+    if (mask > 0).mean() < SKIN_MIN_COVERAGE:
+        logger.info("skin mask too small (%.1f%%), using whole frame", 100 * (mask > 0).mean())
+        return np.full(image_bgr.shape[:2], 255, dtype=np.uint8)
+    return mask
 
 
 def _max_valid_margins(valid_mask: np.ndarray, anchor: tuple[float, float]) -> tuple[int, int, int, int]:
@@ -217,7 +297,7 @@ def _max_valid_margins(valid_mask: np.ndarray, anchor: tuple[float, float]) -> t
 
 def _adjust_side_margins(
     box: tuple[int, int, int, int],
-    points_list: list[np.ndarray],
+    points_list: list[np.ndarray | None],
     anchor_x: float,
     front_trim_ratio: float,
     back_extend_ratio: float,
@@ -233,6 +313,11 @@ def _adjust_side_margins(
     정면 사진은 좌우 윤곽이 거의 대칭이라, 아주 작은 차이만으로 한쪽을 "앞쪽"으로
     판정해버리면 오히려 없던 비대칭을 만들어낸다. ASYMMETRY_THRESHOLD 이상 차이날
     때만 앞/뒤 보정을 하고, 정면일 때는 화면 왼쪽 여백만 조금 줄인다."""
+    if any(points is None for points in points_list):
+        # 수동 2점 모드: 얼굴 윤곽이 없어 앞/뒤도 정면 여부도 판정할 수 없다. 근거 없이
+        # 한쪽을 깎으면 오히려 치우치므로 여백은 그대로 둔다.
+        return box
+
     ax = anchor_x
     left_reach = max(ax - points[FACE_OVAL_RING][:, 0].min() for points in points_list)
     right_reach = max(points[FACE_OVAL_RING][:, 0].max() - ax for points in points_list)
@@ -252,13 +337,18 @@ def _adjust_side_margins(
     return left, top, right, bottom
 
 
-def _crop_to_box(image: np.ndarray, points: np.ndarray, box: tuple[int, int, int, int]) -> tuple[np.ndarray, np.ndarray]:
+def _crop_to_box(image: np.ndarray, points: np.ndarray | None, box: tuple[int, int, int, int]) -> tuple[np.ndarray, np.ndarray | None]:
     left, top, right, bottom = box
-    cropped = image[top:bottom, left:right]
-    adjusted_points = points.copy()
-    adjusted_points[:, 0] = points[:, 0] - left
-    adjusted_points[:, 1] = points[:, 1] - top
-    return cropped, adjusted_points
+    return image[top:bottom, left:right], _shift_points(points, box)
+
+
+def _shift_points(points: np.ndarray | None, box: tuple[int, int, int, int]) -> np.ndarray | None:
+    if points is None:
+        return None
+    shifted = points.copy()
+    shifted[:, 0] = points[:, 0] - box[0]
+    shifted[:, 1] = points[:, 1] - box[1]
+    return shifted
 
 
 def _face_oval_mask(shape: tuple[int, int], points: np.ndarray) -> np.ndarray:
@@ -270,15 +360,16 @@ def _face_oval_mask(shape: tuple[int, int], points: np.ndarray) -> np.ndarray:
 
 def _match_color(
     reference: np.ndarray,
-    reference_points: np.ndarray,
+    reference_mask: np.ndarray,
     target: np.ndarray,
-    target_points: np.ndarray,
+    target_mask: np.ndarray,
+    match_contrast: bool = True,
 ) -> np.ndarray:
     """target의 밝기/색감을 reference(기본값: 전 사진)에 맞춘다 (PRD 6.4).
-    얼굴 영역만으로 통계를 내어, 캔버스 여백(흰색 패딩)이 통계를 왜곡하지 않게 한다."""
-    reference_mask = _face_oval_mask(reference.shape[:2], reference_points)
-    target_mask = _face_oval_mask(target.shape[:2], target_points)
-
+    얼굴 영역만으로 통계를 내어, 캔버스 여백(흰색 패딩)이 통계를 왜곡하지 않게 한다.
+    match_contrast=False면 평균만 맞추고 표준편차(대비)는 건드리지 않는다. 통계 범위가
+    전/후에서 정확히 같은 부위라는 보장이 없는 수동 2점 모드용이다 — 표준편차까지 맞추면
+    작은 표본 차이가 색 전체를 증폭시켜 사진이 망가진다."""
     reference_lab = cv2.cvtColor(reference, cv2.COLOR_BGR2LAB).astype(np.float32)
     target_lab = cv2.cvtColor(target, cv2.COLOR_BGR2LAB).astype(np.float32)
     result_lab = target_lab.copy()
@@ -291,9 +382,10 @@ def _match_color(
 
         reference_mean, reference_std = reference_values.mean(), reference_values.std() + 1e-6
         target_mean, target_std = target_values.mean(), target_values.std() + 1e-6
+        gain = reference_std / target_std if match_contrast else 1.0
 
         channel_data = target_lab[:, :, channel]
-        result_lab[:, :, channel] = (channel_data - target_mean) / target_std * reference_std + reference_mean
+        result_lab[:, :, channel] = (channel_data - target_mean) * gain + reference_mean
 
     result_lab = np.clip(result_lab, 0, 255).astype(np.uint8)
     return cv2.cvtColor(result_lab, cv2.COLOR_LAB2BGR)
@@ -374,37 +466,82 @@ def _apply_face_mosaic(image: np.ndarray, points: np.ndarray) -> np.ndarray:
     return np.clip(blended, 0, 255).astype(np.uint8)
 
 
+ManualPair = tuple[tuple[float, float], tuple[float, float]]
+
+
+def _manual_anchors(pair: ManualPair, shape: tuple[int, int]) -> np.ndarray:
+    """정규화 좌표(0~1)로 받은 두 점을 픽셀 좌표로 바꾸고 화면 왼쪽·오른쪽 순으로 놓는다.
+    프론트엔드가 화면에 줄여 띄운 사진 위에서 클릭을 받으므로, 픽셀이 아니라 비율로
+    주고받아야 표시 크기와 원본 크기가 달라도 어긋나지 않는다."""
+    height, width = shape
+    a, b = (np.array([x * width, y * height], dtype=np.float32) for x, y in pair)
+    left, right = _screen_ordered_pair(a, b)
+    return np.array([left, right], dtype=np.float32)
+
+
 def process_pair(
-    before_bgr: np.ndarray, after_bgr: np.ndarray, apply_mosaic: bool = False
+    before_bgr: np.ndarray,
+    after_bgr: np.ndarray,
+    apply_mosaic: bool = False,
+    manual_points: tuple[ManualPair, ManualPair] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """전/후 사진을 같은 크기·각도·밝기로 맞춘다.
+
+    manual_points를 주면 얼굴 검출을 건너뛰고 그 두 점을 정렬 기준으로 쓴다. 이마·헤어라인
+    클로즈업처럼 눈·코·입이 프레임 밖이라 얼굴 검출이 원리적으로 불가능한 사진용이다.
+    두 사진 모두에 대해 같은 기준으로 찍은 점이어야 하므로 한쪽만 받지는 않는다."""
     warnings: list[str] = []
 
-    before_points = detect_landmarks(cv2.cvtColor(before_bgr, cv2.COLOR_BGR2RGB))
-    after_points = detect_landmarks(cv2.cvtColor(after_bgr, cv2.COLOR_BGR2RGB))
+    if manual_points is not None:
+        before_manual, after_manual = manual_points
+        before_anchors = _manual_anchors(before_manual, before_bgr.shape[:2])
+        after_anchors = _manual_anchors(after_manual, after_bgr.shape[:2])
+        before_points = after_points = None
+        targets = _manual_targets(
+            [before_anchors, after_anchors], [before_bgr.shape[:2], after_bgr.shape[:2]]
+        )
+        if apply_mosaic:
+            warnings.append(
+                "직접 지정 모드에서는 얼굴 위치를 알 수 없어 모자이크를 적용하지 않았습니다."
+            )
+            apply_mosaic = False
+    else:
+        before_points = detect_landmarks(cv2.cvtColor(before_bgr, cv2.COLOR_BGR2RGB))
+        after_points = detect_landmarks(cv2.cvtColor(after_bgr, cv2.COLOR_BGR2RGB))
 
-    if before_points is None:
-        warnings.append("전 사진에서 얼굴을 찾지 못해 원본을 그대로 반환합니다.")
-    if after_points is None:
-        warnings.append("후 사진에서 얼굴을 찾지 못해 원본을 그대로 반환합니다.")
-    if before_points is None or after_points is None:
-        return before_bgr, after_bgr, warnings
+        if before_points is None:
+            warnings.append("전 사진에서 얼굴을 찾지 못해 원본을 그대로 반환합니다.")
+        if after_points is None:
+            warnings.append("후 사진에서 얼굴을 찾지 못해 원본을 그대로 반환합니다.")
+        if before_points is None or after_points is None:
+            return before_bgr, after_bgr, warnings
+
+        before_anchors = np.array(_screen_ordered_brows(before_points), dtype=np.float32)
+        after_anchors = np.array(_screen_ordered_brows(after_points), dtype=np.float32)
+        targets = np.array([TARGET_LEFT_BROW, TARGET_RIGHT_BROW], dtype=np.float32)
 
     aligned_before, before_canonical_points, before_valid_mask, before_warning = _align_to_canonical(
-        before_bgr, before_points
+        before_bgr, before_anchors, targets, before_points
     )
     aligned_after, after_canonical_points, after_valid_mask, after_warning = _align_to_canonical(
-        after_bgr, after_points
+        after_bgr, after_anchors, targets, after_points
     )
     if before_warning:
         warnings.append(f"전 사진: {before_warning}")
     if after_warning:
         warnings.append(f"후 사진: {after_warning}")
 
+    # 크롭이 반드시 품고 있어야 할 기준점. 자동 모드는 눈썹 중앙(캔버스에 고정)이고,
+    # 수동 모드는 사진을 캔버스 한가운데 맞춰뒀으므로 캔버스 중심을 쓴다.
+    crop_anchor = (
+        CROP_ANCHOR if manual_points is None else (CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2)
+    )
+
     # 회전으로 생긴 흰 패딩 쐐기가 안 보이도록, 두 사진 다 패딩이 전혀 없는 영역까지만
     # 남기고 잘라낸다. 가로/세로 각 방향을 독립적으로 넓힌 뒤, 두 사진 모두에게
     # 안전한(패딩이 안 걸리는) 교집합 영역으로 맞춘다 — 그래야 두 결과의 크기가 같아진다.
-    before_box = _max_valid_margins(before_valid_mask, CROP_ANCHOR)
-    after_box = _max_valid_margins(after_valid_mask, CROP_ANCHOR)
+    before_box = _max_valid_margins(before_valid_mask, crop_anchor)
+    after_box = _max_valid_margins(after_valid_mask, crop_anchor)
     final_box = (
         max(before_box[0], after_box[0]),
         max(before_box[1], after_box[1]),
@@ -414,7 +551,7 @@ def process_pair(
     final_box = _adjust_side_margins(
         final_box,
         [before_canonical_points, after_canonical_points],
-        CROP_ANCHOR[0],
+        crop_anchor[0],
         FRONT_MARGIN_TRIM_RATIO,
         BACK_MARGIN_EXTEND_RATIO,
         CANVAS_WIDTH,
@@ -423,7 +560,19 @@ def process_pair(
     aligned_before, before_canonical_points = _crop_to_box(aligned_before, before_canonical_points, final_box)
     aligned_after, after_canonical_points = _crop_to_box(aligned_after, after_canonical_points, final_box)
 
-    matched_after = _match_color(aligned_before, before_canonical_points, aligned_after, after_canonical_points)
+    if manual_points is None:
+        before_color_mask = _face_oval_mask(aligned_before.shape[:2], before_canonical_points)
+        after_color_mask = _face_oval_mask(aligned_after.shape[:2], after_canonical_points)
+    else:
+        before_color_mask = _skin_mask(aligned_before)
+        after_color_mask = _skin_mask(aligned_after)
+    matched_after = _match_color(
+        aligned_before,
+        before_color_mask,
+        aligned_after,
+        after_color_mask,
+        match_contrast=manual_points is None,
+    )
 
     if apply_mosaic:
         aligned_before = _apply_face_mosaic(aligned_before, before_canonical_points)

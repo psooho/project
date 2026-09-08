@@ -1,4 +1,5 @@
 import base64
+import json
 import logging
 import os
 import secrets
@@ -98,17 +99,51 @@ def auth_status(x_app_password: str = Header(default="")) -> dict[str, bool]:
     }
 
 
+# 수동 2점의 두 점이 이보다 가까우면 정렬 기준으로 쓸 수 없다. 간격이 좁을수록 각도·배율
+# 오차가 그만큼 증폭되고, 거의 같은 점이면 변환 자체가 성립하지 않는다.
+MIN_MANUAL_SEPARATION = 0.05
+
+
+def _parse_manual_points(raw: str) -> tuple[tuple, tuple] | None:
+    """프론트엔드가 보낸 수동 기준점을 검증한다.
+
+    형식: {"before": [[x, y], [x, y]], "after": [[x, y], [x, y]]}
+    좌표는 사진 크기 대비 0~1 비율이다. 화면에 줄여 띄운 사진 위에서 클릭을 받으므로
+    픽셀이 아니라 비율로 주고받아야 표시 크기와 원본 크기가 달라도 어긋나지 않는다."""
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        pairs = []
+        for side in ("before", "after"):
+            pair = data[side]
+            if len(pair) != 2:
+                raise ValueError(f"{side}: 점이 2개가 아닙니다")
+            points = tuple((float(x), float(y)) for x, y in pair)
+            if any(not (0.0 <= v <= 1.0) for point in points for v in point):
+                raise ValueError(f"{side}: 좌표가 사진 범위를 벗어났습니다")
+            (x1, y1), (x2, y2) = points
+            if ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5 < MIN_MANUAL_SEPARATION:
+                raise ValueError(f"{side}: 두 점이 너무 가깝습니다")
+            pairs.append(points)
+        return pairs[0], pairs[1]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"기준점이 올바르지 않습니다: {exc}") from exc
+
+
 @app.post("/api/process", dependencies=[Depends(require_password)])
 async def process(
     before: UploadFile = File(...),
     after: UploadFile = File(...),
     mosaic: bool = Form(False),
+    points: str = Form(""),
 ) -> dict:
+    manual_points = _parse_manual_points(points)
     before_bgr = _upload_to_bgr(await before.read())
     after_bgr = _upload_to_bgr(await after.read())
 
     result_before, result_after, warnings = await run_in_threadpool(
-        process_pair, before_bgr, after_bgr, mosaic
+        process_pair, before_bgr, after_bgr, mosaic, manual_points
     )
 
     return {

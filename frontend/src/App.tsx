@@ -2,6 +2,8 @@ import { useState } from "react";
 import "./App.css";
 import { clearStoredPassword, getStoredPassword } from "./components/PasswordGate";
 import { PhotoDropzone } from "./components/PhotoDropzone";
+import { PointPicker } from "./components/PointPicker";
+import type { NormalizedPoint } from "./components/PointPicker";
 
 type Status = "idle" | "processing" | "done";
 type MosaicStatus = "idle" | "processing" | "done";
@@ -41,11 +43,32 @@ const API_BASE_URL = "";
 
 // 실제 정렬(각도·크기)/밝기·색감 보정/헤어라인·눈썹만 남기는 모자이크 처리는
 // 백엔드 파이프라인(backend/app/main.py의 process_pair, PRD 6.2~6.5)에서 이뤄진다.
-async function processPair(before: File, after: File, mosaic: boolean): Promise<Results> {
+type ManualPoints = { before: NormalizedPoint[]; after: NormalizedPoint[] };
+
+/** 백엔드가 "얼굴을 못 찾았다"고 알려주는 경고인지. 이때만 직접 지정 화면을 권한다. */
+function isFaceMissing(warnings: string[]) {
+  return warnings.some((warning) => warning.includes("얼굴을 찾지 못해"));
+}
+
+async function processPair(
+  before: File,
+  after: File,
+  mosaic: boolean,
+  manual?: ManualPoints,
+): Promise<Results> {
   const formData = new FormData();
   formData.append("before", before);
   formData.append("after", after);
   formData.append("mosaic", String(mosaic));
+  if (manual) {
+    formData.append(
+      "points",
+      JSON.stringify({
+        before: manual.before.map((p) => [p.x, p.y]),
+        after: manual.after.map((p) => [p.x, p.y]),
+      }),
+    );
+  }
 
   const res = await fetch(`${API_BASE_URL}/api/process`, {
     method: "POST",
@@ -120,6 +143,11 @@ function App() {
   const [gifBusy, setGifBusy] = useState(false);
   const [gifResult, setGifResult] = useState<{ blob: Blob; url: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // 얼굴 검출이 실패한 사진(이마·헤어라인 클로즈업 등)에서 기준점을 직접 찍는 모드
+  const [picking, setPicking] = useState(false);
+  const [beforePoints, setBeforePoints] = useState<NormalizedPoint[]>([]);
+  const [afterPoints, setAfterPoints] = useState<NormalizedPoint[]>([]);
+  const [usedManual, setUsedManual] = useState(false);
 
   const displayed = showingMosaic && mosaicResult ? mosaicResult : baseResult;
 
@@ -139,13 +167,21 @@ function App() {
     setMosaicResult(null);
     setShowingMosaic(false);
     setMosaicStatus("idle");
+    setUsedManual(false);
     clearGif();
+  }
+
+  function resetPicking() {
+    setPicking(false);
+    setBeforePoints([]);
+    setAfterPoints([]);
   }
 
   function handleBeforeChange(file: File | null) {
     setBeforePhoto(file);
     setStatus("idle");
     resetResults();
+    resetPicking();
     setError(null);
   }
 
@@ -153,23 +189,26 @@ function App() {
     setAfterPhoto(file);
     setStatus("idle");
     resetResults();
+    resetPicking();
     setError(null);
   }
 
-  async function handleTransform() {
+  async function handleTransform(manual?: ManualPoints) {
     if (!beforePhoto || !afterPhoto) return;
     setStatus("processing");
     setError(null);
     try {
-      const processed = await processPair(beforePhoto, afterPhoto, false);
+      const processed = await processPair(beforePhoto, afterPhoto, false, manual);
       revokeResultSet(baseResult);
       revokeResultSet(mosaicResult);
       setBaseResult(toResultSet(processed));
       setMosaicResult(null);
       setShowingMosaic(false);
       setMosaicStatus("idle");
+      setUsedManual(Boolean(manual));
       clearGif();
       setStatus("done");
+      if (manual || !isFaceMissing(processed.warnings)) resetPicking();
     } catch {
       setError("변환 중 문제가 발생했습니다. 다시 시도해주세요.");
       setStatus("idle");
@@ -231,6 +270,8 @@ function App() {
   }
 
   const canTransform = Boolean(beforePhoto && afterPhoto) && status === "idle";
+  const faceMissing = Boolean(displayed && isFaceMissing(displayed.results.warnings));
+  const pointsReady = beforePoints.length === 2 && afterPoints.length === 2;
 
   return (
     <div className="page">
@@ -269,7 +310,44 @@ function App() {
           {displayed.results.warnings.map((warning) => (
             <p key={warning}>⚠ {warning}</p>
           ))}
+          {faceMissing && !picking && (
+            <p className="warning-action">
+              이마·헤어라인만 크게 찍은 사진은 눈·코·입이 없어 얼굴을 자동으로 찾을 수 없습니다.
+              기준점을 직접 찍으면 맞출 수 있습니다.{" "}
+              <button type="button" className="link-btn" onClick={() => setPicking(true)}>
+                직접 찍기
+              </button>
+            </p>
+          )}
         </div>
+      )}
+
+      {picking && beforePhoto && afterPhoto && (
+        <section className="picker-section">
+          <h2 className="picker-title">기준점 직접 지정</h2>
+          <p className="picker-guide">
+            두 사진에서 <strong>같은 자리 두 곳</strong>을 순서대로 클릭해주세요. 눈썹 양 끝처럼
+            <strong> 가로로 벌어진</strong> 지점이 좋습니다 — 찍은 두 점이 수평이 되도록 사진을
+            돌리기 때문입니다. 두 점이 멀수록 정확해집니다.
+          </p>
+          <div className="picker-grid">
+            <PointPicker label="전 (Before)" file={beforePhoto} points={beforePoints} onChange={setBeforePoints} />
+            <PointPicker label="후 (After)" file={afterPhoto} points={afterPoints} onChange={setAfterPoints} />
+          </div>
+          <div className="actions">
+            <button
+              type="button"
+              className="submit-btn"
+              disabled={!pointsReady || status === "processing"}
+              onClick={() => handleTransform({ before: beforePoints, after: afterPoints })}
+            >
+              {status === "processing" ? "처리 중..." : "이 지점으로 변환"}
+            </button>
+            <button type="button" className="submit-btn submit-btn--secondary" onClick={resetPicking}>
+              취소
+            </button>
+          </div>
+        </section>
       )}
 
       <div className="actions">
@@ -278,7 +356,7 @@ function App() {
             <button type="button" className="submit-btn" onClick={handleDownload}>
               다운로드
             </button>
-            {showingMosaic ? (
+            {usedManual ? null : showingMosaic ? (
               <button type="button" className="submit-btn submit-btn--secondary" onClick={handleCancelMosaic}>
                 모자이크 취소
               </button>
@@ -308,7 +386,7 @@ function App() {
             )}
           </>
         ) : (
-          <button type="button" className="submit-btn" disabled={!canTransform} onClick={handleTransform}>
+          <button type="button" className="submit-btn" disabled={!canTransform} onClick={() => handleTransform()}>
             {status === "processing" ? "처리 중..." : "사진 변환"}
           </button>
         )}
