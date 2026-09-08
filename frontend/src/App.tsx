@@ -107,11 +107,27 @@ async function fetchSuggestedPoints(before: File, after: File) {
     available: boolean;
     before: [number, number][] | null;
     after: [number, number][] | null;
+    labels?: string[];
   } = await res.json();
   if (!data.available || !data.before || !data.after) return null;
   const toPoints = (pairs: [number, number][]) => pairs.map(([x, y]) => ({ x, y }));
-  return { before: toPoints(data.before), after: toPoints(data.after) };
+  return {
+    before: toPoints(data.before),
+    after: toPoints(data.after),
+    labels: data.labels ?? [],
+  };
 }
+
+/** 어디를 기준으로 맞췄는지 사람이 읽을 수 있게. 결과를 검토하려면 알아야 한다. */
+const LANDMARK_NAMES: Record<string, string> = {
+  brow_inner: "눈썹 안쪽",
+  brow_outer: "눈썹 바깥쪽",
+  eye_inner: "눈앞머리",
+  eye_outer: "눈꼬리",
+  nose_bridge: "콧대",
+  ear_top: "귀 위",
+  ear_lobe: "귓불",
+};
 
 /** 이미 변환이 끝난 두 장을 보내서 전→후로 스르륵 넘어가는 GIF를 받아온다. */
 async function buildGif(before: Blob, after: Blob): Promise<Blob> {
@@ -176,6 +192,7 @@ function App() {
   const [suggestFailed, setSuggestFailed] = useState(false);
   // 눈썹을 자동으로 찾아 맞춘 결과인지. 사용자가 그 사실을 알아야 검토할 수 있다.
   const [autoAligned, setAutoAligned] = useState(false);
+  const [autoLabels, setAutoLabels] = useState<string[]>([]);
 
   const displayed = showingMosaic && mosaicResult ? mosaicResult : baseResult;
 
@@ -265,9 +282,13 @@ function App() {
           const suggested = await fetchSuggestedPoints(beforePhoto, afterPhoto);
           if (suggested) {
             auto = {
-              points: suggested,
-              result: await processPair(beforePhoto, afterPhoto, false, suggested),
+              points: { before: suggested.before, after: suggested.after },
+              result: await processPair(beforePhoto, afterPhoto, false, {
+                before: suggested.before,
+                after: suggested.after,
+              }),
             };
+            setAutoLabels(suggested.labels);
           } else {
             setSuggestFailed(true);
           }
@@ -305,6 +326,7 @@ function App() {
       setMosaicStatus("idle");
       setUsedManual(Boolean(points));
       setAutoAligned(Boolean(auto));
+      if (!auto) setAutoLabels([]);
       clearGif();
       setStatus("done");
       if (points) setPicking(false);
@@ -428,8 +450,14 @@ function App() {
       {autoAligned && !picking && (
         <div className="auto-banner">
           <p>
-            얼굴을 찾지 못해 <strong>눈썹 위치를 자동으로 찾아</strong> 크기와 각도를 맞췄습니다.
-            결과를 확인해주세요 — 어긋났으면 <strong>변환 취소</strong>를 눌러 직접 고칠 수 있습니다.
+            얼굴을 찾지 못해{" "}
+            <strong>
+              {autoLabels.length > 0
+                ? `${autoLabels.map((l) => LANDMARK_NAMES[l] ?? l).join(" · ")} ${autoLabels.length}곳을 자동으로 찾아`
+                : "기준점을 자동으로 찾아"}
+            </strong>{" "}
+            크기와 각도를 맞췄습니다. 결과를 확인해주세요 — 어긋났으면{" "}
+            <strong>변환 취소</strong>를 눌러 직접 고칠 수 있습니다.
           </p>
         </div>
       )}
