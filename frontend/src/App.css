@@ -364,16 +364,22 @@
   width: 22px;
   height: 22px;
   margin: -11px 0 0 -11px;
+  padding: 0;
   border-radius: 50%;
   background: #2563eb;
   border: 2px solid #fff;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
   color: #fff;
+  font-family: inherit;
   font-size: 0.72rem;
   font-weight: 700;
   line-height: 18px;
   text-align: center;
-  pointer-events: none;
+  cursor: pointer;
+}
+
+.picker-dot:hover {
+  background: #dc2626;
 }
 
 .picker-reset {

@@ -52,13 +52,20 @@ export function PointPicker({ label, file, points, onChange }: PointPickerProps)
           <img src={url} alt={`${label} 기준점 지정`} className="picker-image" onClick={handleClick} />
         )}
         {points.map((point, index) => (
-          <span
+          <button
             key={index}
+            type="button"
             className="picker-dot"
             style={{ left: `${point.x * 100}%`, top: `${point.y * 100}%` }}
+            title="이 점 지우기"
+            onClick={(event) => {
+              // 점을 지우려고 누른 건데 사진 클릭까지 겹쳐서 새 점이 찍히면 안 된다.
+              event.stopPropagation();
+              onChange((previous) => previous.filter((_, i) => i !== index));
+            }}
           >
             {index + 1}
-          </span>
+          </button>
         ))}
       </div>
       {points.length > 0 && (

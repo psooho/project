@@ -148,6 +148,8 @@ function App() {
   const [beforePoints, setBeforePoints] = useState<NormalizedPoint[]>([]);
   const [afterPoints, setAfterPoints] = useState<NormalizedPoint[]>([]);
   const [usedManual, setUsedManual] = useState(false);
+  // 직접 지정으로 변환하기 직전의 결과. "변환 취소"로 되돌릴 수 있게 들고 있는다.
+  const [preManualResult, setPreManualResult] = useState<ResultSet | null>(null);
 
   const displayed = showingMosaic && mosaicResult ? mosaicResult : baseResult;
 
@@ -163,8 +165,10 @@ function App() {
   function resetResults() {
     revokeResultSet(baseResult);
     revokeResultSet(mosaicResult);
+    revokeResultSet(preManualResult);
     setBaseResult(null);
     setMosaicResult(null);
+    setPreManualResult(null);
     setShowingMosaic(false);
     setMosaicStatus("idle");
     setUsedManual(false);
@@ -199,7 +203,15 @@ function App() {
     setError(null);
     try {
       const processed = await processPair(beforePhoto, afterPhoto, false, manual);
-      revokeResultSet(baseResult);
+      if (manual) {
+        // 되돌릴 수 있도록 직전 결과는 해제하지 않고 보관한다.
+        revokeResultSet(preManualResult);
+        setPreManualResult(baseResult);
+      } else {
+        revokeResultSet(baseResult);
+        revokeResultSet(preManualResult);
+        setPreManualResult(null);
+      }
       revokeResultSet(mosaicResult);
       setBaseResult(toResultSet(processed));
       setMosaicResult(null);
@@ -208,7 +220,8 @@ function App() {
       setUsedManual(Boolean(manual));
       clearGif();
       setStatus("done");
-      if (manual || !isFaceMissing(processed.warnings)) resetPicking();
+      if (manual) setPicking(false);
+      else if (!isFaceMissing(processed.warnings)) resetPicking();
     } catch {
       setError("변환 중 문제가 발생했습니다. 다시 시도해주세요.");
       setStatus("idle");
@@ -235,6 +248,21 @@ function App() {
       setError("모자이크 처리 중 문제가 발생했습니다. 다시 시도해주세요.");
       setMosaicStatus("idle");
     }
+  }
+
+  /** 직접 지정 변환을 물리고, 찍어둔 점은 그대로 둔 채 다시 찍기 화면으로 돌아간다. */
+  function handleUndoManual() {
+    if (!preManualResult) return;
+    revokeResultSet(baseResult);
+    revokeResultSet(mosaicResult);
+    setBaseResult(preManualResult);
+    setPreManualResult(null);
+    setMosaicResult(null);
+    setShowingMosaic(false);
+    setMosaicStatus("idle");
+    setUsedManual(false);
+    clearGif();
+    setPicking(true);
   }
 
   function handleCancelMosaic() {
@@ -338,7 +366,7 @@ function App() {
           <p className="picker-guide">
             뚜렷하게 알아볼 수 있는 지점이 더 있으면 3~4곳까지 찍어도 좋습니다. 그러면 서로
             어긋난 곳이 있는지도 검사해드립니다. 다만 <strong>애매한 자리를 억지로 늘리면 오히려
-            부정확</strong>해지니, 확실한 곳만 찍으세요.
+            부정확</strong>해지니, 확실한 곳만 찍으세요. 찍은 점을 다시 누르면 그 점만 지워집니다.
           </p>
           <div className="picker-grid">
             <PointPicker label="전 (Before)" file={beforePhoto} points={beforePoints} onChange={setBeforePoints} />
@@ -371,6 +399,11 @@ function App() {
             <button type="button" className="submit-btn" onClick={handleDownload}>
               다운로드
             </button>
+            {usedManual && preManualResult && (
+              <button type="button" className="submit-btn submit-btn--secondary" onClick={handleUndoManual}>
+                변환 취소
+              </button>
+            )}
             {usedManual ? null : showingMosaic ? (
               <button type="button" className="submit-btn submit-btn--secondary" onClick={handleCancelMosaic}>
                 모자이크 취소
