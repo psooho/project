@@ -595,10 +595,6 @@ def process_pair(
         after_transform = _brow_transform(after_points)
         alignment_pivot = np.array(CROP_ANCHOR, dtype=np.float64)
 
-    if abs(scale_adjust - 1.0) > 1e-6:
-        after_transform = _compose(_scale_about(alignment_pivot, scale_adjust), after_transform)
-        logger.info("scale adjust: after x%.3f", scale_adjust)
-
     aligned_before, before_canonical_points, before_valid_mask, before_warning = _align_to_canonical(
         before_bgr, before_transform, before_points
     )
@@ -635,6 +631,32 @@ def process_pair(
         BACK_MARGIN_EXTEND_RATIO,
         CANVAS_WIDTH,
     )
+    if abs(scale_adjust - 1.0) > 1e-6:
+        # 확대 기준점을 크롭 아래 가장자리에 둔다. 눈썹 중앙을 기준으로 키우면 눈썹 아래쪽이
+        # 경계 밖으로 밀려나 잘리는데(실측: 120%에서 눈썹이 반으로 잘림), 아래 가장자리를
+        # 고정하면 위로만 커져서 눈썹은 제자리에 남는다.
+        pivot = np.array([alignment_pivot[0], float(final_box[3])], dtype=np.float64)
+        after_transform = _compose(_scale_about(pivot, scale_adjust), after_transform)
+        aligned_after, after_canonical_points, after_valid_mask, after_warning = _align_to_canonical(
+            after_bgr, after_transform, after_points
+        )
+        after_box = _max_valid_margins(after_valid_mask, crop_anchor)
+        final_box = (
+            max(before_box[0], after_box[0]),
+            max(before_box[1], after_box[1]),
+            min(before_box[2], after_box[2]),
+            min(before_box[3], after_box[3]),
+        )
+        final_box = _adjust_side_margins(
+            final_box,
+            [before_canonical_points, after_canonical_points],
+            crop_anchor[0],
+            FRONT_MARGIN_TRIM_RATIO,
+            BACK_MARGIN_EXTEND_RATIO,
+            CANVAS_WIDTH,
+        )
+        logger.info("scale adjust: after x%.3f (pivot y=%.0f)", scale_adjust, pivot[1])
+
     logger.info("crop: before=%s after=%s -> using=%s (canvas=%dx%d)", before_box, after_box, final_box, CANVAS_WIDTH, CANVAS_HEIGHT)
     aligned_before, before_canonical_points = _crop_to_box(aligned_before, before_canonical_points, final_box)
     aligned_after, after_canonical_points = _crop_to_box(aligned_after, after_canonical_points, final_box)
