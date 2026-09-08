@@ -99,34 +99,40 @@ def auth_status(x_app_password: str = Header(default="")) -> dict[str, bool]:
     }
 
 
-# 수동 2점의 두 점이 이보다 가까우면 정렬 기준으로 쓸 수 없다. 간격이 좁을수록 각도·배율
-# 오차가 그만큼 증폭되고, 거의 같은 점이면 변환 자체가 성립하지 않는다.
-MIN_MANUAL_SEPARATION = 0.05
+# 기준점이 이보다 좁게 모여 있으면 정렬 기준으로 쓸 수 없다. 간격이 좁을수록 각도·배율
+# 오차가 그만큼 증폭되고, 거의 같은 자리면 변환 자체가 성립하지 않는다.
+MIN_MANUAL_SPREAD = 0.05
+# 점을 더 찍을수록 정확해지지만 이 이상은 실익이 없고 화면만 복잡해진다.
+MAX_MANUAL_POINTS = 6
 
 
-def _parse_manual_points(raw: str) -> tuple[tuple, tuple] | None:
+def _parse_manual_points(raw: str) -> tuple[list, list] | None:
     """프론트엔드가 보낸 수동 기준점을 검증한다.
 
-    형식: {"before": [[x, y], [x, y]], "after": [[x, y], [x, y]]}
+    형식: {"before": [[x, y], ...], "after": [[x, y], ...]}  (각각 2~6개)
     좌표는 사진 크기 대비 0~1 비율이다. 화면에 줄여 띄운 사진 위에서 클릭을 받으므로
-    픽셀이 아니라 비율로 주고받아야 표시 크기와 원본 크기가 달라도 어긋나지 않는다."""
+    픽셀이 아니라 비율로 주고받아야 표시 크기와 원본 크기가 달라도 어긋나지 않는다.
+    찍은 순서가 전/후의 대응 관계이므로 개수가 같아야 한다."""
     if not raw:
         return None
     try:
         data = json.loads(raw)
-        pairs = []
+        sides = {}
         for side in ("before", "after"):
-            pair = data[side]
-            if len(pair) != 2:
-                raise ValueError(f"{side}: 점이 2개가 아닙니다")
-            points = tuple((float(x), float(y)) for x, y in pair)
+            points = [(float(x), float(y)) for x, y in data[side]]
+            if not 2 <= len(points) <= MAX_MANUAL_POINTS:
+                raise ValueError(f"{side}: 점은 2~{MAX_MANUAL_POINTS}개여야 합니다 (지금 {len(points)}개)")
             if any(not (0.0 <= v <= 1.0) for point in points for v in point):
                 raise ValueError(f"{side}: 좌표가 사진 범위를 벗어났습니다")
-            (x1, y1), (x2, y2) = points
-            if ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5 < MIN_MANUAL_SEPARATION:
-                raise ValueError(f"{side}: 두 점이 너무 가깝습니다")
-            pairs.append(points)
-        return pairs[0], pairs[1]
+            xs = [x for x, _ in points]
+            ys = [y for _, y in points]
+            spread = ((max(xs) - min(xs)) ** 2 + (max(ys) - min(ys)) ** 2) ** 0.5
+            if spread < MIN_MANUAL_SPREAD:
+                raise ValueError(f"{side}: 점들이 너무 가까이 모여 있습니다")
+            sides[side] = points
+        if len(sides["before"]) != len(sides["after"]):
+            raise ValueError("전/후 사진의 점 개수가 다릅니다")
+        return sides["before"], sides["after"]
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail=f"기준점이 올바르지 않습니다: {exc}") from exc
 

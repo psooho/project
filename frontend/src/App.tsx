@@ -271,7 +271,11 @@ function App() {
 
   const canTransform = Boolean(beforePhoto && afterPhoto) && status === "idle";
   const faceMissing = Boolean(displayed && isFaceMissing(displayed.results.warnings));
-  const pointsReady = beforePoints.length === 2 && afterPoints.length === 2;
+  // 찍은 순서가 전/후의 대응 관계라 개수가 같아야 한다.
+  const pointsReady =
+    beforePoints.length >= 2 && beforePoints.length === afterPoints.length;
+  const pointCountMismatch =
+    beforePoints.length >= 2 && afterPoints.length >= 2 && beforePoints.length !== afterPoints.length;
 
   return (
     <div className="page">
@@ -326,15 +330,26 @@ function App() {
         <section className="picker-section">
           <h2 className="picker-title">기준점 직접 지정</h2>
           <p className="picker-guide">
-            두 사진에서 <strong>같은 자리 두 곳</strong>을 순서대로 클릭해주세요. 눈썹 양 끝처럼
-            <strong> 가로로 벌어진</strong> 지점이 좋습니다 — 찍은 두 점이 수평이 되도록 사진을
-            돌리기 때문입니다. 두 점이 멀수록 정확해집니다.
+            두 사진에서 <strong>같은 자리</strong>를 <strong>같은 순서로</strong> 클릭해주세요.
+            최소 2곳이면 되고, 눈썹 양 끝처럼 <strong>최대한 멀리 벌어진</strong> 지점을 고르는 게
+            가장 효과가 큽니다 — 간격을 2배로 벌리면 오차가 절반으로 줄어듭니다. 1번→2번 점이
+            수평이 되도록 사진을 돌립니다.
+          </p>
+          <p className="picker-guide">
+            뚜렷하게 알아볼 수 있는 지점이 더 있으면 3~4곳까지 찍어도 좋습니다. 그러면 서로
+            어긋난 곳이 있는지도 검사해드립니다. 다만 <strong>애매한 자리를 억지로 늘리면 오히려
+            부정확</strong>해지니, 확실한 곳만 찍으세요.
           </p>
           <div className="picker-grid">
             <PointPicker label="전 (Before)" file={beforePhoto} points={beforePoints} onChange={setBeforePoints} />
             <PointPicker label="후 (After)" file={afterPhoto} points={afterPoints} onChange={setAfterPoints} />
           </div>
           <div className="actions">
+            {pointCountMismatch && (
+              <span className="error-note">
+                전 {beforePoints.length}곳, 후 {afterPoints.length}곳 — 개수를 같게 맞춰주세요.
+              </span>
+            )}
             <button
               type="button"
               className="submit-btn"

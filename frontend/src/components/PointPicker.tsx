@@ -8,6 +8,9 @@ export interface NormalizedPoint {
   y: number;
 }
 
+/** 이 이상은 정확도가 거의 안 늘고 화면만 복잡해진다 (백엔드도 같은 값으로 막는다). */
+export const MAX_POINTS = 6;
+
 interface PointPickerProps {
   label: string;
   file: File;
@@ -32,16 +35,16 @@ export function PointPicker({ label, file, points, onChange }: PointPickerProps)
       x: (event.clientX - rect.left) / rect.width,
       y: (event.clientY - rect.top) / rect.height,
     };
-    // 두 점을 다 찍은 뒤 또 누르면 처음부터 다시 찍는 것으로 본다.
-    onChange((previous) => (previous.length >= 2 ? [point] : [...previous, point]));
+    // 다 채운 뒤 또 누르면 처음부터 다시 찍는 것으로 본다.
+    onChange((previous) => (previous.length >= MAX_POINTS ? [point] : [...previous, point]));
   }
 
   return (
     <div className="picker">
       <div className="picker-header">
         <span className="picker-label">{label}</span>
-        <span className={`picker-count${points.length === 2 ? " picker-count--done" : ""}`}>
-          {points.length}/2
+        <span className={`picker-count${points.length >= 2 ? " picker-count--done" : ""}`}>
+          {points.length}개
         </span>
       </div>
       <div className="picker-stage">

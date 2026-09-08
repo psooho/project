@@ -83,6 +83,10 @@ MAX_TRUSTED_ROTATION_DEG = 45.0
 
 # 회전 때문에 사진이 캔버스 밖으로 밀려나지 않도록 두는 여유.
 MANUAL_FIT_SAFETY = 0.95
+# 점을 3개 이상 찍으면 전/후의 점들이 서로 맞는지 검사할 수 있다 (2개는 어떻게 찍든 항상
+# 정확히 맞아떨어져서 검사가 불가능하다). 남는 오차가 점들이 퍼진 범위의 이 비율을 넘으면
+# 서로 다른 자리를 찍은 것으로 보고 경고한다.
+MANUAL_RESIDUAL_WARN_RATIO = 0.06
 # 색 보정 통계를 낼 피부 픽셀의 YCrCb 범위. 자동 모드는 얼굴 윤곽 안쪽으로 범위를
 # 잡지만 수동 모드에는 윤곽이 없다. 프레임 전체를 쓰면 이식으로 늘어난 머리숱만큼
 # 후 사진이 어두워져, 그걸 상쇄하려고 엉뚱하게 밝아진다. 그래서 피부만 골라 쓴다.
@@ -146,27 +150,26 @@ def _lift_front(transform: np.ndarray, points: np.ndarray | None) -> np.ndarray:
     return stacked[:2].astype(np.float32)
 
 
+def _brow_transform(points: np.ndarray) -> np.ndarray:
+    """자동 모드: 두 눈썹을 캔버스의 고정 위치에 놓는 변환."""
+    screen_left_brow, screen_right_brow = _screen_ordered_brows(points)
+    src = np.array([screen_left_brow, screen_right_brow], dtype=np.float32)
+    dst = np.array([TARGET_LEFT_BROW, TARGET_RIGHT_BROW], dtype=np.float32)
+    transform, _ = cv2.estimateAffinePartial2D(src, dst)
+    return _lift_front(transform, points)
+
+
 def _align_to_canonical(
     image_bgr: np.ndarray,
-    anchors: np.ndarray,
-    targets: np.ndarray,
+    transform: np.ndarray,
     points: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray, str | None]:
-    """anchors(원본 사진의 기준점 2개)가 targets(캔버스 좌표 2개)에 놓이도록 회전·확대·
-    이동시킨다. points는 있으면 같이 변환해서 돌려주고, 없으면(수동 2점 모드) None."""
-    src = np.asarray(anchors, dtype=np.float32)
-    dst = np.asarray(targets, dtype=np.float32)
-
-    transform, _ = cv2.estimateAffinePartial2D(src, dst)
-    transform = _lift_front(transform, points)
-
+    """이미 계산된 변환으로 사진을 캔버스에 얹는다. points는 있으면 같이 변환해서
+    돌려주고, 없으면(수동 기준점 모드) None."""
     warning = None
     rotation_deg = float(np.degrees(np.arctan2(transform[1, 0], transform[0, 0])))
     zoom_scale = float(np.hypot(transform[0, 0], transform[1, 0]))
-    source_interbrow_px = float(np.linalg.norm(src[1] - src[0]))
-    logger.info(
-        "align: interbrow=%.1fpx rotation=%.1fdeg zoom=%.2fx", source_interbrow_px, rotation_deg, zoom_scale
-    )
+    logger.info("align: rotation=%.1fdeg zoom=%.2fx", rotation_deg, zoom_scale)
     if abs(rotation_deg) > MAX_TRUSTED_ROTATION_DEG:
         warning = "얼굴 각도가 너무 기울어져 있어 정렬 결과의 신뢰도가 낮을 수 있습니다."
 
@@ -200,35 +203,86 @@ def _apply_transform(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
     return np.hstack([points.astype(np.float32), ones]) @ transform.T
 
 
-def _manual_targets(
-    anchor_pairs: list[np.ndarray], shapes: list[tuple[int, int]]
-) -> np.ndarray:
-    """수동 2점 모드에서 기준점 두 개가 놓일 캔버스 좌표를 정한다.
+def _fit_similarity(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
+    """대응점들로부터 회전+배율+이동(유사변환)을 최소제곱으로 구한다 (Umeyama).
 
-    자동 모드는 두 눈썹을 항상 160px 간격에 놓지만, 수동 모드는 사용자가 어디를 찍을지
-    알 수 없다. 눈썹 양 끝처럼 멀리 떨어진 두 점을 찍었는데 그 간격을 160px로 줄여버리면
-    사진이 심하게 축소돼 결과물 해상도가 뭉개진다. 그래서 간격을 고정하지 않고 두 사진이
-    캔버스를 최대한 채우도록 역산한다 — 전/후가 서로 같은 배율·각도로 맞춰지는 성질은
-    그대로 유지되고, 해상도 손실만 없앤다."""
-    separations = [float(np.linalg.norm(pair[1] - pair[0])) for pair in anchor_pairs]
-    # 각 사진이 캔버스에 딱 들어가는 배율에서 역산한 간격 중 작은 쪽을 쓴다.
-    fit_scales = [min(CANVAS_WIDTH / w, CANVAS_HEIGHT / h) for h, w in shapes]
-    target_sep = min(f * s for f, s in zip(fit_scales, separations)) * MANUAL_FIT_SAFETY
+    점이 2개면 정확해와 같고, 3개 이상이면 클릭 오차가 서로 상쇄돼 더 정확해진다.
+    늘리거나 비트는(어파인) 변환은 얼굴을 일그러뜨리므로 쓰지 않는다."""
+    src = np.asarray(src, dtype=np.float64)
+    dst = np.asarray(dst, dtype=np.float64)
+    src_mean, dst_mean = src.mean(axis=0), dst.mean(axis=0)
+    src_centered, dst_centered = src - src_mean, dst - dst_mean
 
-    canvas_center = np.array([CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2], dtype=np.float32)
-    half = np.array([target_sep / 2, 0.0], dtype=np.float32)
-    targets = np.array([canvas_center - half, canvas_center + half], dtype=np.float32)
+    covariance = (dst_centered.T @ src_centered) / len(src)
+    u, singular, vt = np.linalg.svd(covariance)
+    # 반사(거울상)로 뒤집히지 않도록 행렬식 부호를 바로잡는다.
+    correction = np.diag([1.0, np.sign(np.linalg.det(u @ vt))])
+    rotation = u @ correction @ vt
 
-    # 기준점을 캔버스 한가운데 두면, 눈썹처럼 사진 아래쪽에 찍은 경우 위쪽(머리)이 캔버스
-    # 밖으로 밀려난다. 사진 중심이 캔버스 중심에 오도록 목표 좌표를 통째로 옮겨준다.
-    offsets = []
-    for pair, (h, w) in zip(anchor_pairs, shapes):
-        transform, _ = cv2.estimateAffinePartial2D(
-            np.asarray(pair, dtype=np.float32), targets
-        )
-        image_center = np.array([[w / 2, h / 2]], dtype=np.float32)
-        offsets.append(canvas_center - _apply_transform(image_center, transform)[0])
-    return (targets + np.mean(offsets, axis=0)).astype(np.float32)
+    variance = (src_centered ** 2).sum() / len(src)
+    scale = singular.sum() / variance if variance > 0 else 1.0
+
+    linear = scale * rotation
+    return np.hstack([linear, (dst_mean - linear @ src_mean).reshape(2, 1)]).astype(np.float32)
+
+
+def _fit_residual(src: np.ndarray, dst: np.ndarray, transform: np.ndarray) -> float:
+    """맞춘 뒤에도 남는 어긋남의 크기(픽셀). 점이 2개면 항상 0이다."""
+    mapped = _apply_transform(np.asarray(src, dtype=np.float32), transform)
+    return float(np.sqrt(((mapped - np.asarray(dst, dtype=np.float32)) ** 2).sum(axis=1).mean()))
+
+
+def _corners(shape: tuple[int, int]) -> np.ndarray:
+    height, width = shape
+    return np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
+
+
+def _manual_transforms(
+    before_anchors: np.ndarray,
+    after_anchors: np.ndarray,
+    before_shape: tuple[int, int],
+    after_shape: tuple[int, int],
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """수동 기준점 모드에서 전/후 사진 각각의 변환을 구한다.
+
+    두 단계로 나눈다. (1) 후 사진을 전 사진에 맞추는 변환 — 여기서만 기준점을 쓰고,
+    점이 많을수록 정확해진다. (2) 전 사진 기준의 화면 배치 — 1번→2번 점이 수평이 되도록
+    돌리고, 두 사진이 다 들어오도록 확대해 캔버스 가운데 놓는다.
+
+    자동 모드처럼 기준점을 캔버스의 고정 좌표에 박지 않는 이유: 사용자가 어디를 찍을지
+    알 수 없어서, 눈썹 양 끝처럼 멀리 떨어진 두 점을 고정 간격으로 줄이면 사진이 심하게
+    축소돼 해상도가 뭉개진다."""
+    after_to_before = _fit_similarity(after_anchors, before_anchors)
+    residual = _fit_residual(after_anchors, before_anchors, after_to_before)
+
+    # 1번→2번 점을 수평으로. 오른쪽 점을 먼저 찍었더라도 사진이 뒤집히지 않게 방향만 맞춘다.
+    direction = np.asarray(before_anchors[1], dtype=np.float64) - np.asarray(before_anchors[0], dtype=np.float64)
+    if direction[0] < 0:
+        direction = -direction
+    angle = np.arctan2(direction[1], direction[0])
+    cos, sin = np.cos(-angle), np.sin(-angle)
+    rotation = np.array([[cos, -sin], [sin, cos]], dtype=np.float64)
+
+    # 두 사진의 네 귀퉁이를 모두 전 사진 좌표계로 모아, 회전 후 크기를 잰다.
+    spread = np.vstack([
+        _corners(before_shape),
+        _apply_transform(_corners(after_shape), after_to_before),
+    ]) @ rotation.T
+    extent = spread.max(axis=0) - spread.min(axis=0)
+    scale = MANUAL_FIT_SAFETY * min(CANVAS_WIDTH / extent[0], CANVAS_HEIGHT / extent[1])
+
+    linear = scale * rotation
+    center = (spread.max(axis=0) + spread.min(axis=0)) / 2 * scale
+    offset = np.array([CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2]) - center
+    base = np.hstack([linear, offset.reshape(2, 1)]).astype(np.float32)
+
+    return base, _compose(base, after_to_before), residual
+
+
+def _compose(outer: np.ndarray, inner: np.ndarray) -> np.ndarray:
+    """두 어파인 변환을 잇는다 (inner를 적용한 뒤 outer)."""
+    stacked = np.vstack([outer, [0, 0, 1]]) @ np.vstack([inner, [0, 0, 1]])
+    return stacked[:2].astype(np.float32)
 
 
 def _skin_mask(image_bgr: np.ndarray) -> np.ndarray:
@@ -466,30 +520,30 @@ def _apply_face_mosaic(image: np.ndarray, points: np.ndarray) -> np.ndarray:
     return np.clip(blended, 0, 255).astype(np.uint8)
 
 
-ManualPair = tuple[tuple[float, float], tuple[float, float]]
+ManualPoints = list[tuple[float, float]]
 
 
-def _manual_anchors(pair: ManualPair, shape: tuple[int, int]) -> np.ndarray:
-    """정규화 좌표(0~1)로 받은 두 점을 픽셀 좌표로 바꾸고 화면 왼쪽·오른쪽 순으로 놓는다.
+def _manual_anchors(points: ManualPoints, shape: tuple[int, int]) -> np.ndarray:
+    """정규화 좌표(0~1)로 받은 기준점들을 픽셀 좌표로 바꾼다.
+
     프론트엔드가 화면에 줄여 띄운 사진 위에서 클릭을 받으므로, 픽셀이 아니라 비율로
-    주고받아야 표시 크기와 원본 크기가 달라도 어긋나지 않는다."""
+    주고받아야 표시 크기와 원본 크기가 달라도 어긋나지 않는다. 찍은 순서가 곧 전/후의
+    대응 관계이므로 정렬하지 않고 그대로 둔다."""
     height, width = shape
-    a, b = (np.array([x * width, y * height], dtype=np.float32) for x, y in pair)
-    left, right = _screen_ordered_pair(a, b)
-    return np.array([left, right], dtype=np.float32)
+    return np.array([[x * width, y * height] for x, y in points], dtype=np.float32)
 
 
 def process_pair(
     before_bgr: np.ndarray,
     after_bgr: np.ndarray,
     apply_mosaic: bool = False,
-    manual_points: tuple[ManualPair, ManualPair] | None = None,
+    manual_points: tuple[ManualPoints, ManualPoints] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """전/후 사진을 같은 크기·각도·밝기로 맞춘다.
 
-    manual_points를 주면 얼굴 검출을 건너뛰고 그 두 점을 정렬 기준으로 쓴다. 이마·헤어라인
+    manual_points를 주면 얼굴 검출을 건너뛰고 그 점들을 정렬 기준으로 쓴다. 이마·헤어라인
     클로즈업처럼 눈·코·입이 프레임 밖이라 얼굴 검출이 원리적으로 불가능한 사진용이다.
-    두 사진 모두에 대해 같은 기준으로 찍은 점이어야 하므로 한쪽만 받지는 않는다."""
+    찍은 순서가 전/후의 대응 관계이므로 개수가 같아야 하고, 한쪽만 받지는 않는다."""
     warnings: list[str] = []
 
     if manual_points is not None:
@@ -497,9 +551,16 @@ def process_pair(
         before_anchors = _manual_anchors(before_manual, before_bgr.shape[:2])
         after_anchors = _manual_anchors(after_manual, after_bgr.shape[:2])
         before_points = after_points = None
-        targets = _manual_targets(
-            [before_anchors, after_anchors], [before_bgr.shape[:2], after_bgr.shape[:2]]
+        before_transform, after_transform, residual = _manual_transforms(
+            before_anchors, after_anchors, before_bgr.shape[:2], after_bgr.shape[:2]
         )
+        # 점이 3개 이상일 때만 의미가 있다 — 2개는 어떻게 찍든 오차가 0으로 떨어진다.
+        spread = float(np.linalg.norm(before_anchors.max(axis=0) - before_anchors.min(axis=0)))
+        if len(before_anchors) > 2 and spread > 0 and residual > spread * MANUAL_RESIDUAL_WARN_RATIO:
+            warnings.append(
+                "전/후 사진의 기준점이 서로 잘 맞지 않습니다. 같은 자리를 찍었는지 확인해주세요."
+            )
+        logger.info("manual: %d points, residual=%.1fpx (spread=%.1fpx)", len(before_anchors), residual, spread)
         if apply_mosaic:
             warnings.append(
                 "직접 지정 모드에서는 얼굴 위치를 알 수 없어 모자이크를 적용하지 않았습니다."
@@ -516,15 +577,14 @@ def process_pair(
         if before_points is None or after_points is None:
             return before_bgr, after_bgr, warnings
 
-        before_anchors = np.array(_screen_ordered_brows(before_points), dtype=np.float32)
-        after_anchors = np.array(_screen_ordered_brows(after_points), dtype=np.float32)
-        targets = np.array([TARGET_LEFT_BROW, TARGET_RIGHT_BROW], dtype=np.float32)
+        before_transform = _brow_transform(before_points)
+        after_transform = _brow_transform(after_points)
 
     aligned_before, before_canonical_points, before_valid_mask, before_warning = _align_to_canonical(
-        before_bgr, before_anchors, targets, before_points
+        before_bgr, before_transform, before_points
     )
     aligned_after, after_canonical_points, after_valid_mask, after_warning = _align_to_canonical(
-        after_bgr, after_anchors, targets, after_points
+        after_bgr, after_transform, after_points
     )
     if before_warning:
         warnings.append(f"전 사진: {before_warning}")
