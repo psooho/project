@@ -632,15 +632,28 @@ def process_pair(
         CANVAS_WIDTH,
     )
     if abs(scale_adjust - 1.0) > 1e-6:
-        # 확대 기준점을 크롭 아래 가장자리에 둔다. 눈썹 중앙을 기준으로 키우면 눈썹 아래쪽이
-        # 경계 밖으로 밀려나 잘리는데(실측: 120%에서 눈썹이 반으로 잘림), 아래 가장자리를
-        # 고정하면 위로만 커져서 눈썹은 제자리에 남는다.
+        # 배율은 두 사진의 "상대" 크기다. 그래서 후 사진을 줄이는 대신 전 사진을 그만큼
+        # 키워도 결과는 같은데, 축소는 부작용이 두 가지 있다 — 사진이 캔버스를 덜 덮어
+        # 크롭 하단이 올라오고, 남은 내용도 기준점 쪽으로 끌려 내려온다. 둘이 겹쳐서
+        # 눈썹이 잘렸다(실측: 80%에서 여유 17px, 70%에서 2.8px). 그래서 어느 쪽이든
+        # "키우는" 방향으로만 적용한다.
+        #
+        # 확대 기준점은 크롭 아래 가장자리다. 그 아래는 어차피 잘려 나가는 영역이라
+        # 확대해도 위로만 커지고, 아래 가장자리에 붙어 있는 눈썹은 제자리에 남는다.
         pivot = np.array([alignment_pivot[0], float(final_box[3])], dtype=np.float64)
-        after_transform = _compose(_scale_about(pivot, scale_adjust), after_transform)
-        aligned_after, after_canonical_points, after_valid_mask, after_warning = _align_to_canonical(
-            after_bgr, after_transform, after_points
-        )
-        after_box = _max_valid_margins(after_valid_mask, crop_anchor)
+        if scale_adjust > 1.0:
+            after_transform = _compose(_scale_about(pivot, scale_adjust), after_transform)
+            aligned_after, after_canonical_points, after_valid_mask, after_warning = _align_to_canonical(
+                after_bgr, after_transform, after_points
+            )
+            after_box = _max_valid_margins(after_valid_mask, crop_anchor)
+        else:
+            before_transform = _compose(_scale_about(pivot, 1.0 / scale_adjust), before_transform)
+            aligned_before, before_canonical_points, before_valid_mask, before_warning = _align_to_canonical(
+                before_bgr, before_transform, before_points
+            )
+            before_box = _max_valid_margins(before_valid_mask, crop_anchor)
+
         final_box = (
             max(before_box[0], after_box[0]),
             max(before_box[1], after_box[1]),
@@ -655,7 +668,10 @@ def process_pair(
             BACK_MARGIN_EXTEND_RATIO,
             CANVAS_WIDTH,
         )
-        logger.info("scale adjust: after x%.3f (pivot y=%.0f)", scale_adjust, pivot[1])
+        logger.info(
+            "scale adjust: x%.3f applied to %s (pivot y=%.0f)",
+            scale_adjust, "after" if scale_adjust > 1 else "before", pivot[1],
+        )
 
     logger.info("crop: before=%s after=%s -> using=%s (canvas=%dx%d)", before_box, after_box, final_box, CANVAS_WIDTH, CANVAS_HEIGHT)
     aligned_before, before_canonical_points = _crop_to_box(aligned_before, before_canonical_points, final_box)
