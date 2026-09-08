@@ -16,7 +16,7 @@ from PIL import Image, ImageOps
 
 from .animation import build_crossfade_gif
 from .pipeline import process_pair
-from .suggest import is_available as suggest_available, matched_points
+from .suggest import can_level, is_available as suggest_available, matched_points
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("app")
@@ -149,6 +149,7 @@ async def process(
     mosaic: bool = Form(False),
     points: str = Form(""),
     scale_adjust: float = Form(1.0),
+    level: bool = Form(False),
 ) -> dict:
     manual_points = _parse_manual_points(points)
     if not MIN_SCALE_ADJUST <= scale_adjust <= MAX_SCALE_ADJUST:
@@ -160,7 +161,7 @@ async def process(
     after_bgr = _upload_to_bgr(await after.read())
 
     result_before, result_after, warnings = await run_in_threadpool(
-        process_pair, before_bgr, after_bgr, mosaic, manual_points, scale_adjust
+        process_pair, before_bgr, after_bgr, mosaic, manual_points, scale_adjust, level
     )
 
     return {
@@ -180,13 +181,13 @@ async def suggest_points(before: UploadFile = File(...), after: UploadFile = Fil
     어디까지나 제안이라 실패해도 오류로 처리하지 않는다 — 화면은 빈 상태로 두고 사용자가
     직접 찍으면 된다. 그래서 available=false나 points=null도 정상 응답이다."""
     if not suggest_available():
-        return {"available": False, "before": None, "after": None, "labels": []}
+        return {"available": False, "before": None, "after": None, "labels": [], "level": False}
 
     before_bytes = await before.read()
     after_bytes = await after.read()
     result = await run_in_threadpool(matched_points, before_bytes, after_bytes)
     if result is None:
-        return {"available": True, "before": None, "after": None, "labels": []}
+        return {"available": True, "before": None, "after": None, "labels": [], "level": False}
 
     before_points, after_points, labels = result
     return {
@@ -194,6 +195,8 @@ async def suggest_points(before: UploadFile = File(...), after: UploadFile = Fil
         "before": before_points,
         "after": after_points,
         "labels": labels,
+        # 양쪽 눈썹이 다 잡혔을 때만 수평을 맞출 수 있다 (자세한 이유는 suggest.can_level).
+        "level": can_level(labels),
     }
 
 

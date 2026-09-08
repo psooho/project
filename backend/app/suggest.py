@@ -57,18 +57,25 @@ ENOUGH_ANSWERS = 4
 # "가장 높은 지점"이 실측에서 47~115픽셀까지 흔들렸다 — 완만한 곡선의 꼭대기는 사람도
 # 모델도 짚기 어렵다.
 LANDMARKS = [
-    ("brow_inner", "눈썹에서 코 쪽(안쪽) 끝"),
-    ("brow_outer", "눈썹에서 관자놀이 쪽(바깥) 끝"),
-    ("eye_inner", "눈앞머리(안쪽 눈구석)"),
-    ("eye_outer", "눈꼬리(바깥쪽 눈구석)"),
+    ("left_brow_outer", "화면 왼쪽 눈썹의 바깥(화면 왼쪽) 끝"),
+    ("left_brow_inner", "화면 왼쪽 눈썹의 안쪽(코 쪽) 끝"),
+    ("right_brow_inner", "화면 오른쪽 눈썹의 안쪽(코 쪽) 끝"),
+    ("right_brow_outer", "화면 오른쪽 눈썹의 바깥(화면 오른쪽) 끝"),
+    ("left_eye_outer", "화면 왼쪽 눈의 눈꼬리"),
+    ("right_eye_outer", "화면 오른쪽 눈의 눈꼬리"),
     ("nose_bridge", "두 눈 사이 콧대 위"),
     ("ear_top", "귀가 머리에 붙는 맨 위 지점"),
-    ("ear_lobe", "귓불 맨 아래"),
 ]
+
+# 정렬의 수평 기준이 되는 지점들. 눈썹은 좌우가 거의 같은 높이라, 이 점들을 잇는 선을
+# 수평으로 맞추면 사진이 똑바로 선다. 자동(MediaPipe) 모드가 두 눈썹으로 하는 것과 같다.
+BROW_LANDMARKS = ("left_brow_outer", "left_brow_inner", "right_brow_inner", "right_brow_outer")
 
 PROMPT = """이마와 헤어라인을 크게 찍은 클로즈업 사진이야. 얼굴 아래쪽은 잘려 있을 수 있어.
 아래 지점 중 사진에 **또렷하게 보이는 것만** 골라서 위치를 찍어줘. 안 보이거나 확실하지
 않으면 그 항목은 빼. 없는 걸 지어내지 마.
+왼쪽·오른쪽은 **보는 사람 기준(화면 기준)**이야. 눈썹이 둘 다 보이면 넷을 다 찍어주고,
+하나만 보이면 그게 화면 어느 쪽에 있는지에 따라 left_ 또는 right_ 두 개만 찍어줘.
 머리카락과 헤어라인은 절대 쓰지 마 — 수술로 바뀌는 부위라 기준이 될 수 없어.
 얼굴이 여러 개 보이면 가장 크게 나온 얼굴 하나만 써.
 
@@ -224,6 +231,18 @@ def suggest_landmarks(image_bytes: bytes) -> dict[str, tuple[float, float]]:
 
     logger.info("suggest: %s (응답 %d회)", list(result) or "찾은 지점 없음", len(answers))
     return result
+
+
+def can_level(labels: list[str]) -> bool:
+    """찾은 지점들로 사진을 똑바로 세울 수 있는지.
+
+    양쪽 눈썹이 다 있을 때만 가능하다. 두 눈썹은 좌우 같은 높이라 그 선이 곧 수평이지만,
+    눈썹 하나의 기울기는 고개가 기울어서인지 옆으로 돌아서인지 구분할 수 없다. 실제로
+    측면 사진에서 한쪽 눈썹만 보고 수평을 맞췄더니 사진이 돌아가면서 흰 여백이 생기고,
+    그걸 잘라내느라 눈썹이 통째로 프레임 밖으로 나갔다."""
+    return any(l.startswith("left_brow") for l in labels) and any(
+        l.startswith("right_brow") for l in labels
+    )
 
 
 def matched_points(

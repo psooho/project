@@ -62,12 +62,16 @@ async function processPair(
   mosaic: boolean,
   manual?: ManualPoints,
   scaleAdjust = 1,
+  level = false,
 ): Promise<Results> {
   const formData = new FormData();
   formData.append("before", before);
   formData.append("after", after);
   formData.append("mosaic", String(mosaic));
   formData.append("scale_adjust", String(scaleAdjust));
+  // 자동으로 찾은 점은 눈썹인 걸 알기 때문에 그 선을 수평으로 맞춘다. 직접 찍은 점은
+  // 무엇인지 알 수 없어 방향을 강제하지 않는다.
+  formData.append("level", String(level));
   if (manual) {
     formData.append(
       "points",
@@ -116,6 +120,7 @@ async function fetchSuggestedPoints(before: File, after: File) {
     before: [number, number][] | null;
     after: [number, number][] | null;
     labels?: string[];
+    level?: boolean;
   } = await res.json();
   if (!data.available || !data.before || !data.after) return null;
   const toPoints = (pairs: [number, number][]) => pairs.map(([x, y]) => ({ x, y }));
@@ -123,6 +128,7 @@ async function fetchSuggestedPoints(before: File, after: File) {
     before: toPoints(data.before),
     after: toPoints(data.after),
     labels: data.labels ?? [],
+    level: data.level ?? false,
   };
 }
 
@@ -206,8 +212,24 @@ function App() {
   // 지금 화면의 결과를 만들 때 쓴 기준점. 크기만 조정할 때 다시 찾지 않고 그대로 쓴다
   // (자동 탐색은 15~20초가 걸리고 호출 요금도 든다).
   const [lastPoints, setLastPoints] = useState<ManualPoints | undefined>(undefined);
+  // 자동으로 찾아준 점. 지금 쓰는 점이 이것과 같으면 눈썹인 걸 아는 셈이라 수평을 맞춘다.
+  const [suggestedPoints, setSuggestedPoints] = useState<ManualPoints | null>(null);
+  // 양쪽 눈썹이 다 잡힌 경우에만 수평을 맞출 수 있다 (백엔드가 판단해서 알려준다).
+  const [suggestedLevel, setSuggestedLevel] = useState(false);
 
   const displayed = showingMosaic && mosaicResult ? mosaicResult : baseResult;
+
+  /** 지금 쓰는 기준점이 자동으로 찾아준 것 그대로인지 (사용자가 손대면 false). */
+  function isSuggested(points?: ManualPoints) {
+    if (!points || !suggestedPoints) return false;
+    const same = (a: NormalizedPoint[], b: NormalizedPoint[]) =>
+      a.length === b.length && a.every((p, i) => p.x === b[i].x && p.y === b[i].y);
+    return (
+      suggestedLevel &&
+      same(points.before, suggestedPoints.before) &&
+      same(points.after, suggestedPoints.after)
+    );
+  }
 
   /** 만들어 둔 GIF는 지금 화면에 보이는 사진 기준이라, 사진이나 모자이크 상태가
    *  바뀌면 더 이상 맞지 않는다. 그럴 때 지워서 다시 만들게 한다. */
@@ -231,6 +253,8 @@ function App() {
     setAutoAligned(false);
     setScaleAdjust(1);
     setLastPoints(undefined);
+    setSuggestedPoints(null);
+    setSuggestedLevel(false);
     clearGif();
   }
 
@@ -254,6 +278,8 @@ function App() {
       if (suggested) {
         setBeforePoints(suggested.before);
         setAfterPoints(suggested.after);
+        setSuggestedPoints({ before: suggested.before, after: suggested.after });
+        setSuggestedLevel(suggested.level);
       } else {
         setSuggestFailed(true);
       }
@@ -286,7 +312,7 @@ function App() {
     setError(null);
     setSuggestFailed(false);
     try {
-      const first = await processPair(beforePhoto, afterPhoto, false, manual);
+      const first = await processPair(beforePhoto, afterPhoto, false, manual, 1, isSuggested(manual));
 
       // 얼굴을 못 찾았으면 눈썹 위치를 자동으로 받아 한 번 더 맞춰본다. 사용자가 점을
       // 찍지 않아도 변환 한 번으로 끝나고, 결과가 어긋나면 "변환 취소"로 고칠 수 있다.
@@ -296,13 +322,15 @@ function App() {
         try {
           const suggested = await fetchSuggestedPoints(beforePhoto, afterPhoto);
           if (suggested) {
+            const points = { before: suggested.before, after: suggested.after };
             auto = {
-              points: { before: suggested.before, after: suggested.after },
-              result: await processPair(beforePhoto, afterPhoto, false, {
-                before: suggested.before,
-                after: suggested.after,
-              }),
+              points,
+              result: await processPair(
+                beforePhoto, afterPhoto, false, points, 1, suggested.level,
+              ),
             };
+            setSuggestedPoints(points);
+            setSuggestedLevel(suggested.level);
             setAutoLabels(suggested.labels);
           } else {
             setSuggestFailed(true);
@@ -365,7 +393,9 @@ function App() {
     setMosaicStatus("processing");
     setError(null);
     try {
-      const processed = await processPair(beforePhoto, afterPhoto, true, lastPoints, scaleAdjust);
+      const processed = await processPair(
+        beforePhoto, afterPhoto, true, lastPoints, scaleAdjust, isSuggested(lastPoints),
+      );
       setMosaicResult(toResultSet(processed));
       setShowingMosaic(true);
       clearGif();
@@ -384,7 +414,9 @@ function App() {
     setScaleBusy(true);
     setError(null);
     try {
-      const processed = await processPair(beforePhoto, afterPhoto, false, lastPoints, next);
+      const processed = await processPair(
+        beforePhoto, afterPhoto, false, lastPoints, next, isSuggested(lastPoints),
+      );
       revokeResultSet(baseResult);
       revokeResultSet(mosaicResult);
       setBaseResult(toResultSet(processed));

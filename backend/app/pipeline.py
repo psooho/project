@@ -250,6 +250,7 @@ def _manual_transforms(
     after_anchors: np.ndarray,
     before_shape: tuple[int, int],
     after_shape: tuple[int, int],
+    level: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """수동 기준점 모드에서 전/후 사진 각각의 변환을 구한다.
 
@@ -257,10 +258,11 @@ def _manual_transforms(
     점이 많을수록 정확해진다. (2) 화면 배치 — 두 사진이 다 들어오도록 확대해 캔버스
     가운데 놓는다.
 
-    전 사진은 일부러 돌리지 않는다. 자동 모드는 찍힌 점이 눈썹인 걸 알기 때문에 수평으로
-    맞추는 게 의미가 있지만, 수동 모드는 사용자가 무엇을 찍었는지 알 수 없어서 특정 방향을
-    강제할 근거가 없다. 예전에는 1번→2번 점을 수평으로 맞췄는데, "두 점을 멀리 벌리라"는
-    안내를 따라 헤어라인 위와 눈썹처럼 세로로 찍으면 사진이 80도 넘게 누워버렸다.
+    level=True면 기준점들을 잇는 선(가장 왼쪽 점 → 가장 오른쪽 점)이 수평이 되게 돌린다.
+    눈썹 위치를 자동으로 찾은 경우처럼 "이 점들이 눈썹"이라는 걸 아는 때만 켠다. 사용자가
+    직접 찍은 점은 무엇인지 알 수 없어 방향을 강제할 근거가 없다 — 예전에 무조건 수평으로
+    맞췄더니, "두 점을 멀리 벌리라"는 안내를 따라 헤어라인 위와 눈썹처럼 세로로 찍은 경우
+    사진이 80도 넘게 누워버렸다.
 
     자동 모드처럼 기준점을 캔버스의 고정 좌표에 박지 않는 이유: 사용자가 어디를 찍을지
     알 수 없어서, 눈썹 양 끝처럼 멀리 떨어진 두 점을 고정 간격으로 줄이면 사진이 심하게
@@ -268,15 +270,25 @@ def _manual_transforms(
     after_to_before = _fit_similarity(after_anchors, before_anchors)
     residual = _fit_residual(after_anchors, before_anchors, after_to_before)
 
+    rotation = np.eye(2)
+    if level:
+        ordered = np.asarray(before_anchors, dtype=np.float64)
+        ordered = ordered[np.argsort(ordered[:, 0])]
+        direction = ordered[-1] - ordered[0]
+        angle = np.arctan2(direction[1], direction[0])
+        cos, sin = np.cos(-angle), np.sin(-angle)
+        rotation = np.array([[cos, -sin], [sin, cos]], dtype=np.float64)
+        logger.info("manual: 눈썹선 %.1f도 -> 수평", np.degrees(angle))
+
     # 두 사진의 네 귀퉁이를 모두 전 사진 좌표계로 모아 필요한 크기를 잰다.
     spread = np.vstack([
         _corners(before_shape),
         _apply_transform(_corners(after_shape), after_to_before),
-    ])
+    ]) @ rotation.T
     extent = spread.max(axis=0) - spread.min(axis=0)
     scale = MANUAL_FIT_SAFETY * min(CANVAS_WIDTH / extent[0], CANVAS_HEIGHT / extent[1])
 
-    linear = scale * np.eye(2)
+    linear = scale * rotation
     center = (spread.max(axis=0) + spread.min(axis=0)) / 2 * scale
     offset = np.array([CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2]) - center
     base = np.hstack([linear, offset.reshape(2, 1)]).astype(np.float32)
@@ -551,12 +563,16 @@ def process_pair(
     apply_mosaic: bool = False,
     manual_points: tuple[ManualPoints, ManualPoints] | None = None,
     scale_adjust: float = 1.0,
+    level_points: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """전/후 사진을 같은 크기·각도·밝기로 맞춘다.
 
     manual_points를 주면 얼굴 검출을 건너뛰고 그 점들을 정렬 기준으로 쓴다. 이마·헤어라인
     클로즈업처럼 눈·코·입이 프레임 밖이라 얼굴 검출이 원리적으로 불가능한 사진용이다.
     찍은 순서가 전/후의 대응 관계이므로 개수가 같아야 하고, 한쪽만 받지는 않는다.
+
+    level_points는 기준점들을 잇는 선을 수평으로 맞출지 여부다. 눈썹 위치를 자동으로 찾은
+    경우처럼 그 점들이 무엇인지 알 때만 켠다.
 
     scale_adjust는 후 사진만 그만큼 더 키우거나 줄인다. 두 사진의 고개 각도가 다르면
     2D 변환으로는 어떤 기준점을 써도 한쪽이 틀어진다 — 눈썹을 맞추면 두상이 안 맞고
@@ -570,7 +586,7 @@ def process_pair(
         after_anchors = _manual_anchors(after_manual, after_bgr.shape[:2])
         before_points = after_points = None
         before_transform, after_transform, residual = _manual_transforms(
-            before_anchors, after_anchors, before_bgr.shape[:2], after_bgr.shape[:2]
+            before_anchors, after_anchors, before_bgr.shape[:2], after_bgr.shape[:2], level_points
         )
         # 점이 3개 이상일 때만 의미가 있다 — 2개는 어떻게 찍든 오차가 0으로 떨어진다.
         spread = float(np.linalg.norm(before_anchors.max(axis=0) - before_anchors.min(axis=0)))
