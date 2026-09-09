@@ -704,8 +704,11 @@ def process_pair(
             )
             before_box = _max_valid_margins(before_valid_mask, crop_anchor)
 
-        before_alignment_points = _apply_transform(before_anchors, before_transform)
-        after_alignment_points = _apply_transform(after_anchors, after_transform)
+        # 기준점은 수동/자동제안 모드에만 있다. 자동(얼굴 검출) 모드에서는 없으므로
+        # 건드리지 않는다 — 예전에 조건 없이 참조해서 크기 조절이 500 에러로 죽었다.
+        if manual_points is not None:
+            before_alignment_points = _apply_transform(before_anchors, before_transform)
+            after_alignment_points = _apply_transform(after_anchors, after_transform)
 
         final_box = (
             max(before_box[0], after_box[0]),
