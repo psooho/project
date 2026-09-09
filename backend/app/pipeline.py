@@ -693,9 +693,22 @@ def process_pair(
         # 눈썹이 잘렸다(실측: 80%에서 여유 17px, 70%에서 2.8px). 그래서 어느 쪽이든
         # "키우는" 방향으로만 적용한다.
         #
-        # 확대 기준점은 크롭 아래 가장자리다. 그 아래는 어차피 잘려 나가는 영역이라
-        # 확대해도 위로만 커지고, 아래 가장자리에 붙어 있는 눈썹은 제자리에 남는다.
-        pivot = np.array([alignment_pivot[0], float(final_box[3])], dtype=np.float64)
+        # 확대 기준점은 크롭의 "아래 + 얼굴 앞쪽" 모서리다. 그 바깥은 어차피 잘려 나가는
+        # 영역이라, 확대해도 안쪽(위·뒤통수 쪽)으로만 커지고 눈썹과 얼굴 앞 여백은 제자리에
+        # 남는다. 예전에는 가로 기준점이 눈썹 중앙이라 얼굴 앞쪽이 밖으로 밀려났다
+        # (실측: 130%에서 앞 여백이 19.9% -> 13.7%로 줄었다).
+        #
+        # 앞쪽이 어느 쪽인지는 기준점 위치로 정한다 — 눈썹은 머리 앞쪽에 있으므로,
+        # 기준점이 더 가까이 붙어 있는 가장자리가 얼굴 앞이다.
+        pivot_x = alignment_pivot[0]
+        if before_alignment_points is not None and after_alignment_points is not None:
+            anchors_x = np.concatenate(
+                [before_alignment_points[:, 0], after_alignment_points[:, 0]]
+            )
+            to_left = float(anchors_x.min()) - final_box[0]
+            to_right = final_box[2] - float(anchors_x.max())
+            pivot_x = float(final_box[0] if to_left <= to_right else final_box[2])
+        pivot = np.array([pivot_x, float(final_box[3])], dtype=np.float64)
         if scale_adjust > 1.0:
             after_transform = _compose(_scale_about(pivot, scale_adjust), after_transform)
             aligned_after, after_canonical_points, after_valid_mask, after_warning = _align_to_canonical(
