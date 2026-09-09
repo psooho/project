@@ -9,23 +9,39 @@ interface AdjustSliderProps {
   step: number;
   busy: boolean;
   hint?: string;
+  /** 끄는 도중 계속 불린다. 가벼운 미리보기용. */
+  onPreview: (value: number) => void;
+  /** 손을 뗐을 때 한 번 불린다. 원본 크기로 확정한다. */
   onCommit: (value: number) => void;
 }
 
 /** 끌어서 조절하는 슬라이더.
  *
- *  끄는 동안에는 숫자만 따라 움직이고, 손을 뗐을 때 한 번만 실제로 적용한다. 한 번 계산에
- *  2초쯤 걸려서, 움직일 때마다 보내면 요청이 밀린다. */
-export function AdjustSlider({ label, value, min, max, step, busy, hint, onCommit }: AdjustSliderProps) {
+ *  끄는 동안에는 작게 줄인 미리보기를 계속 받아 실시간으로 보여주고, 손을 뗐을 때 원본
+ *  크기로 한 번 더 받아 확정한다. 요청은 한 번에 하나씩만 나가도록 부모가 직렬화한다. */
+export function AdjustSlider({
+  label,
+  value,
+  min,
+  max,
+  step,
+  busy,
+  hint,
+  onPreview,
+  onCommit,
+}: AdjustSliderProps) {
   const [dragging, setDragging] = useState<number | null>(null);
   const shown = dragging ?? value;
   const toPercent = (v: number) => Math.round(v * 100);
 
   function commit() {
+    // 움직이지 않았으면(그냥 클릭했으면) dragging이 없다. 그때만 건너뛴다.
     if (dragging === null) return;
     const next = dragging;
     setDragging(null);
-    if (next !== value) onCommit(next);
+    // 값이 그대로여도 반드시 보낸다 — 끄는 동안 받은 건 작게 줄인 미리보기라,
+    // 여기서 원본 크기로 다시 받아야 다운로드·GIF에 쓸 수 있다.
+    onCommit(next);
   }
 
   return (
@@ -38,7 +54,11 @@ export function AdjustSlider({ label, value, min, max, step, busy, hint, onCommi
         max={toPercent(max)}
         step={toPercent(step)}
         value={toPercent(shown)}
-        onChange={(event) => setDragging(Number(event.target.value) / 100)}
+        onChange={(event) => {
+          const next = Number(event.target.value) / 100;
+          setDragging(next);
+          onPreview(next);
+        }}
         // 마우스·터치·키보드 어느 쪽으로 움직였든 "끝난 시점"에 적용한다.
         onPointerUp={commit}
         onKeyUp={commit}

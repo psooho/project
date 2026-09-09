@@ -581,6 +581,7 @@ def process_pair(
     level_points: bool = False,
     brightness_strength: float = 1.0,
     tone_strength: float = 1.0,
+    preview_width: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """전/후 사진을 같은 크기·각도·밝기로 맞춘다.
 
@@ -590,6 +591,10 @@ def process_pair(
 
     brightness_strength/tone_strength는 밝기·색감 보정의 세기다 (0이면 원본, 1이면 완전히
     맞춤).
+
+    preview_width를 주면 결과를 그 폭으로 줄여서 돌려준다. 슬라이더를 끄는 동안 실시간으로
+    보여주기 위한 것이다 — 색 보정이 픽셀 수에 비례해서(전체 214ms 중 144ms) 줄이면 그만큼
+    빨라지고, 전송량도 596KB에서 크게 줄어든다. 손을 떼면 원래 크기로 다시 받는다.
 
     level_points는 기준점들을 잇는 선을 수평으로 맞출지 여부다. 눈썹 위치를 자동으로 찾은
     경우처럼 그 점들이 무엇인지 알 때만 켠다.
@@ -748,6 +753,18 @@ def process_pair(
     logger.info("crop: before=%s after=%s -> using=%s (canvas=%dx%d)", before_box, after_box, final_box, CANVAS_WIDTH, CANVAS_HEIGHT)
     aligned_before, before_canonical_points = _crop_to_box(aligned_before, before_canonical_points, final_box)
     aligned_after, after_canonical_points = _crop_to_box(aligned_after, after_canonical_points, final_box)
+
+    # 미리보기는 여기서 줄인다. 정렬·크롭까지 끝난 뒤라 결과 구도는 원본과 같고, 뒤따르는
+    # 색 보정만 작은 이미지에서 돌아간다.
+    if preview_width and aligned_before.shape[1] > preview_width:
+        ratio = preview_width / aligned_before.shape[1]
+        size = (preview_width, max(1, round(aligned_before.shape[0] * ratio)))
+        aligned_before = cv2.resize(aligned_before, size, interpolation=cv2.INTER_AREA)
+        aligned_after = cv2.resize(aligned_after, size, interpolation=cv2.INTER_AREA)
+        if before_canonical_points is not None:
+            before_canonical_points = before_canonical_points * ratio
+        if after_canonical_points is not None:
+            after_canonical_points = after_canonical_points * ratio
 
     if manual_points is None:
         before_color_mask = _face_oval_mask(aligned_before.shape[:2], before_canonical_points)

@@ -71,6 +71,7 @@ async function processPair(
   level = false,
   brightnessStrength = 1,
   toneStrength = 1,
+  preview = false,
 ): Promise<Results> {
   const formData = new FormData();
   formData.append("before", before);
@@ -82,6 +83,8 @@ async function processPair(
   formData.append("level", String(level));
   formData.append("brightness_strength", String(brightnessStrength));
   formData.append("tone_strength", String(toneStrength));
+  // 끄는 도중에는 작게 줄인 결과를 받는다 (서버 계산 181ms -> 60ms, 전송량도 크게 줄어든다).
+  formData.append("preview", String(preview));
   if (manual) {
     formData.append(
       "points",
@@ -221,7 +224,7 @@ function App() {
   const [adjust, setAdjust] = useState({ brightness: 1, tone: 1, scale: 1 });
   const [adjustBusy, setAdjustBusy] = useState(false);
   // 계산 중에 슬라이더를 또 움직이면 여기 담아뒀다가 끝난 뒤 한 번만 더 계산한다.
-  const pendingAdjust = useRef<typeof adjust | null>(null);
+  const pendingAdjust = useRef<{ values: typeof adjust; preview: boolean } | null>(null);
   // 지금 화면의 결과를 만들 때 쓴 기준점. 크기만 조정할 때 다시 찾지 않고 그대로 쓴다
   // (자동 탐색은 15~20초가 걸리고 호출 요금도 든다).
   const [lastPoints, setLastPoints] = useState<ManualPoints | undefined>(undefined);
@@ -427,30 +430,37 @@ function App() {
 
   /** 밝기·색감·크기를 다시 계산한다. 정렬 기준점은 그대로 두므로 눈썹을 다시 찾지 않는다.
    *
-   *  계산 중에 슬라이더를 또 움직이면 그 값을 담아뒀다가, 끝난 뒤 마지막 값으로 한 번만 더
-   *  계산한다. 요청을 그때그때 보내면 2초짜리 작업이 줄줄이 밀린다. */
-  async function applyAdjust(next: Partial<typeof adjust>) {
+   *  끄는 도중(preview=true)에는 작게 줄인 결과를 받아 실시간으로 보여주고, 손을 뗐을 때
+   *  원본 크기로 한 번 더 받아 확정한다. 요청은 한 번에 하나씩만 나간다 — 처리 중에 또
+   *  움직이면 마지막 값만 담아뒀다가 끝난 뒤 이어서 계산한다. */
+  async function applyAdjust(next: Partial<typeof adjust>, preview = false) {
     if (!beforePhoto || !afterPhoto || status !== "done") return;
-    const target = { ...adjust, ...next };
+    const values = { ...adjust, ...next };
+    setAdjust(values);
     if (adjustBusy) {
-      pendingAdjust.current = target;
-      setAdjust(target);
+      pendingAdjust.current = { values, preview };
       return;
     }
     setAdjustBusy(true);
     setError(null);
-    let current = target;
+    let current = { values, preview };
     try {
       for (;;) {
-        setAdjust(current);
         const processed = await processPair(
-          beforePhoto, afterPhoto, false, lastPoints, current.scale, isSuggested(lastPoints),
-          current.brightness, current.tone,
+          beforePhoto, afterPhoto, false, lastPoints, current.values.scale,
+          isSuggested(lastPoints), current.values.brightness, current.values.tone,
+          current.preview,
         );
-        revokeResultSet(baseResult);
-        revokeResultSet(mosaicResult);
-        setBaseResult(toResultSet(processed));
-        setMosaicResult(null);
+        // 직전 결과의 URL은 함수형 갱신으로 해제한다. 미리보기가 빠르게 이어지는 동안
+        // 오래된 값을 붙잡고 있으면 URL이 새어나간다.
+        setBaseResult((previous) => {
+          revokeResultSet(previous);
+          return toResultSet(processed);
+        });
+        setMosaicResult((previous) => {
+          revokeResultSet(previous);
+          return null;
+        });
         setShowingMosaic(false);
         setMosaicStatus("idle");
         clearGif();
@@ -647,6 +657,7 @@ function App() {
             step={MATCH_STEP}
             busy={adjustBusy}
             hint="0%면 원본, 100%면 전 사진에 맞춤"
+            onPreview={(value) => applyAdjust({ brightness: value }, true)}
             onCommit={(value) => applyAdjust({ brightness: value })}
           />
           <AdjustSlider
@@ -657,6 +668,7 @@ function App() {
             step={MATCH_STEP}
             busy={adjustBusy}
             hint="두 사진의 색이 실제로 다를 때만 효과가 보입니다"
+            onPreview={(value) => applyAdjust({ tone: value }, true)}
             onCommit={(value) => applyAdjust({ tone: value })}
           />
           <AdjustSlider
@@ -667,6 +679,7 @@ function App() {
             step={SCALE_STEP}
             busy={adjustBusy}
             hint="두상 크기가 안 맞으면 끌어서 맞춰주세요"
+            onPreview={(value) => applyAdjust({ scale: value }, true)}
             onCommit={(value) => applyAdjust({ scale: value })}
           />
         </section>

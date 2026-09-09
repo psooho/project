@@ -78,10 +78,10 @@ def _upload_to_bgr(data: bytes) -> np.ndarray:
     return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
 
-def _bgr_to_data_url(image_bgr: np.ndarray) -> str:
+def _bgr_to_data_url(image_bgr: np.ndarray, quality: int = 92) -> str:
     rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     buffer = BytesIO()
-    Image.fromarray(rgb).save(buffer, format="JPEG", quality=92)
+    Image.fromarray(rgb).save(buffer, format="JPEG", quality=quality)
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     return f"data:image/jpeg;base64,{encoded}"
 
@@ -111,6 +111,10 @@ MIN_SCALE_ADJUST = 0.6
 MAX_SCALE_ADJUST = 1.6
 # 밝기·색감 보정 세기의 허용 범위. 0이면 원본, 1이면 완전히 맞춤, 그 이상은 과보정이다.
 MAX_MATCH_STRENGTH = 1.5
+# 슬라이더를 끄는 동안 보내는 미리보기의 폭과 품질. 화면에서 보기엔 충분하면서 응답이
+# 훨씬 가볍다 (전체 크기 596KB -> 이 크기면 수십 KB).
+PREVIEW_WIDTH = 800
+PREVIEW_JPEG_QUALITY = 80
 
 
 def _parse_manual_points(raw: str) -> tuple[list, list] | None:
@@ -154,6 +158,7 @@ async def process(
     level: bool = Form(False),
     brightness_strength: float = Form(1.0),
     tone_strength: float = Form(1.0),
+    preview: bool = Form(False),
 ) -> dict:
     manual_points = _parse_manual_points(points)
     for name, value in (("밝기", brightness_strength), ("색감", tone_strength)):
@@ -180,11 +185,13 @@ async def process(
         level,
         brightness_strength,
         tone_strength,
+        PREVIEW_WIDTH if preview else 0,
     )
 
+    quality = PREVIEW_JPEG_QUALITY if preview else 92
     return {
-        "before": _bgr_to_data_url(result_before),
-        "after": _bgr_to_data_url(result_after),
+        "before": _bgr_to_data_url(result_before, quality),
+        "after": _bgr_to_data_url(result_after, quality),
         "warnings": warnings,
     }
 
