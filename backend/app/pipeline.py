@@ -151,10 +151,21 @@ SKIN_MIN_COVERAGE = 0.05
 # 않으면 두 사진이 겹치는 영역이 사라지는데, 그대로 두면 빈 이미지가 만들어져 변환이
 # 죽는다. 죽는 대신 무엇이 잘못됐는지 말해주는 게 낫다.
 MIN_RESULT_SIZE_PX = 32
+# 입력 사진의 긴 변 한계. 이보다 크면 줄여서 쓴다. 스크롤 캡처처럼 아주 긴 이미지를
+# 그대로 넣으면 MediaPipe 안쪽 OpenCV가 SHRT_MAX(32767) 단언에 걸려 파이썬 예외가 아니라
+# abort()로 프로세스를 통째로 죽인다 (실측: 4725x29451 사진에서 서버가 내려갔고, 높이
+# 8192는 살고 16384는 죽었다 — 내부에서 두 배로 키우는 듯하다).
+#
+# 결과 캔버스가 2400x2200이라 4096이면 이미 충분히 크고, 지금 쓰는 사진 중 가장 큰 것도
+# 4096x2730이라 실제 사진은 줄어들지 않는다.
+MAX_INPUT_SIDE = 4096
 # 전/후 기준점이 벌어진 정도가 이 배수 이상 차이나면 같은 자리를 찍은 게 아니라고 본다.
 # 두 장은 같은 사람을 비슷한 거리에서 찍은 것이라 간격이 그렇게까지 다를 수 없다.
 # 이 상태로 맞추면 한쪽이 극단적으로 작게 얹혀 결과가 쓸모없어진다.
 MANUAL_SPREAD_RATIO_WARN = 2.5
+# 수동 모드에서 전/후 크롭이 이만큼도 안 겹치면 경고한다. 실측: 제대로 찍은 경우 0.99
+# 이상, 전/후에 서로 다른 자리를 찍은 경우 0.10~0.17.
+MANUAL_OVERLAP_WARN_RATIO = 0.5
 
 
 class UnusableResult(Exception):
@@ -434,6 +445,11 @@ def _skin_mask(image_bgr: np.ndarray) -> np.ndarray:
     return mask
 
 
+def _box_area(box: tuple[int, int, int, int]) -> int:
+    """(left, top, right, bottom) 사각형의 넓이. 뒤집힌 사각형은 0으로 본다."""
+    return max(0, box[2] - box[0]) * max(0, box[3] - box[1])
+
+
 def _max_valid_margins(valid_mask: np.ndarray, anchor: tuple[float, float]) -> tuple[int, int, int, int]:
     """anchor(눈썹 중앙)를 포함하면서 흰 패딩을 전혀 포함하지 않는 사각형
     (left, top, right, bottom)을 구한다.
@@ -666,6 +682,18 @@ def _manual_anchors(points: ManualPoints, shape: tuple[int, int]) -> np.ndarray:
     return np.array([[x * width, y * height] for x, y in points], dtype=np.float32)
 
 
+def _limit_input_size(image: np.ndarray) -> np.ndarray:
+    """너무 큰 사진을 MAX_INPUT_SIDE 안으로 줄인다. 작으면 그대로 돌려준다."""
+    height, width = image.shape[:2]
+    longest = max(height, width)
+    if longest <= MAX_INPUT_SIDE:
+        return image
+    ratio = MAX_INPUT_SIDE / longest
+    size = (max(1, round(width * ratio)), max(1, round(height * ratio)))
+    logger.info("입력 축소: %dx%d -> %dx%d", width, height, size[0], size[1])
+    return cv2.resize(image, size, interpolation=cv2.INTER_AREA)
+
+
 def process_pair(
     before_bgr: np.ndarray,
     after_bgr: np.ndarray,
@@ -698,6 +726,11 @@ def process_pair(
     두상을 맞추면 눈썹이 안 맞는다(실측: 같은 두 장에서 가로 기준 1.12배, 세로 기준
     0.89배). 자동으로 정할 수 없는 값이라 사람이 보고 미세조정할 수 있게 열어둔다."""
     warnings: list[str] = []
+
+    # 얼굴 검출·정렬 전에 크기부터 잡는다. 수동 기준점은 0~1로 정규화된 값이라 여기서
+    # 줄여도 가리키는 자리가 그대로다.
+    before_bgr = _limit_input_size(before_bgr)
+    after_bgr = _limit_input_size(after_bgr)
 
     if manual_points is not None:
         before_manual, after_manual = manual_points
@@ -803,6 +836,20 @@ def process_pair(
             min(before_box[2], after_box[2]),
             min(before_box[3], after_box[3]),
         )
+        # 결과는 두 크롭의 교집합이다. 전/후에 서로 다른 자리를 찍으면 두 사진이 어긋나게
+        # 얹히면서 교집합만 얇아지는데, 크기 하한(MIN_RESULT_SIZE_PX)은 넘기기 때문에
+        # 실낱 같은 띠가 아무 말 없이 나갔다 (실측: 470x138). 간격 경고로도 안 잡힌다 —
+        # 간격은 같고 위치만 다를 수 있어서다. 그래서 겹치는 넓이를 따로 본다.
+        smaller_area = min(_box_area(before_box), _box_area(after_box))
+        if smaller_area > 0:
+            overlap_ratio = _box_area(final_box) / smaller_area
+            if overlap_ratio < MANUAL_OVERLAP_WARN_RATIO:
+                logger.info("manual: 전/후 겹침 %.2f", overlap_ratio)
+                warnings.append(
+                    "전/후 사진에서 찍은 기준점이 서로 다른 자리로 보입니다. 두 사진이 "
+                    f"{round(overlap_ratio * 100)}%만 겹쳐서 결과가 많이 잘렸습니다. "
+                    "같은 부위를 찍었는지 확인해주세요."
+                )
     if abs(scale_adjust - 1.0) > 1e-6:
         # 배율은 두 사진의 "상대" 크기다. 그래서 후 사진을 줄이는 대신 전 사진을 그만큼
         # 키워도 결과는 같은데, 축소는 부작용이 두 가지 있다 — 사진이 캔버스를 덜 덮어
