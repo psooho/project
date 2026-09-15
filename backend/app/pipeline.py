@@ -152,20 +152,46 @@ def _screen_ordered_pair(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.n
     return (a, b) if a[0] <= b[0] else (b, a)
 
 
-def _front_is_right(points: np.ndarray) -> bool | None:
-    """코가 향하는 쪽("앞쪽")이 화면 오른쪽인지 판정한다. 좌우가 비슷하면(정면) None.
+def _facing_asymmetry(points: np.ndarray) -> tuple[float, bool]:
+    """(좌우 비대칭 정도, 앞쪽이 화면 오른쪽인지)를 돌려준다.
 
     옆모습에서는 볼·턱 실루엣이 넓게 퍼지는 귀 쪽 윤곽이 코 쪽보다 더 멀리 뻗으므로,
-    윤곽이 "덜" 뻗은 쪽이 앞(코) 방향이다 (_adjust_side_margins와 같은 기준)."""
+    윤곽이 "덜" 뻗은 쪽이 앞(코) 방향이다."""
     brow_mid_x = float(points[EYEBROW_IDX][:, 0].mean())
     oval_x = points[FACE_OVAL_RING][:, 0]
     left_reach = brow_mid_x - float(oval_x.min())
     right_reach = float(oval_x.max()) - brow_mid_x
 
     longer, shorter = max(left_reach, right_reach), min(left_reach, right_reach)
-    if longer <= 0 or (longer - shorter) / longer < SIDE_ASYMMETRY_THRESHOLD:
-        return None
-    return right_reach < left_reach
+    asymmetry = 0.0 if longer <= 0 else (longer - shorter) / longer
+    return asymmetry, right_reach < left_reach
+
+
+def _front_is_right(points: np.ndarray) -> bool | None:
+    """코가 향하는 쪽("앞쪽")이 화면 오른쪽인지 판정한다. 좌우가 비슷하면(정면) None."""
+    asymmetry, front_is_right = _facing_asymmetry(points)
+    return None if asymmetry < SIDE_ASYMMETRY_THRESHOLD else front_is_right
+
+
+def _pair_facing(
+    before_points: np.ndarray, after_points: np.ndarray
+) -> tuple[bool | None, bool]:
+    """전/후 두 장을 함께 보고 정면/측면을 한 번만 정한다. (판정, 둘이 갈렸는지)
+
+    한 장만 보고 정하면 두 사진이 판정 기준을 사이에 두고 갈릴 때 나머지 한 장에 엉뚱한
+    틀이 씌워진다 — 측면인데 정면 틀을 쓰면 뒤통수 쪽이 좁아 귀가 잘린다. 그래서 두 장의
+    비대칭 정도를 평균 내어 한 번만 판정하고, 방향은 신호가 뚜렷한(비대칭이 큰) 쪽에서
+    가져온다."""
+    before_asymmetry, before_right = _facing_asymmetry(before_points)
+    after_asymmetry, after_right = _facing_asymmetry(after_points)
+
+    averaged = (before_asymmetry + after_asymmetry) / 2
+    disagreed = (before_asymmetry >= SIDE_ASYMMETRY_THRESHOLD) != (
+        after_asymmetry >= SIDE_ASYMMETRY_THRESHOLD
+    )
+    if averaged < SIDE_ASYMMETRY_THRESHOLD:
+        return None, disagreed
+    return (before_right if before_asymmetry >= after_asymmetry else after_right), disagreed
 
 
 def _lift_front(transform: np.ndarray, points: np.ndarray | None) -> np.ndarray:
@@ -335,7 +361,12 @@ def _manual_transforms(
         _apply_transform(_corners(after_shape), after_to_before),
     ]) @ rotation.T
     extent = spread.max(axis=0) - spread.min(axis=0)
-    scale = MANUAL_FIT_SAFETY * min(CANVAS_WIDTH / extent[0], CANVAS_HEIGHT / extent[1])
+    # 캔버스를 채우되 원본보다 키우지는 않는다. 캔버스는 정렬 작업판일 뿐이라 여기에 맞춰
+    # 늘리면 없던 해상도가 생기는 게 아니라 보간으로 흐려지기만 하고 용량만 커진다
+    # (캔버스를 2400으로 키웠을 때 944px짜리 원본이 2018px로 2.1배 늘어났었다).
+    scale = min(
+        1.0, MANUAL_FIT_SAFETY * min(CANVAS_WIDTH / extent[0], CANVAS_HEIGHT / extent[1])
+    )
 
     linear = scale * rotation
     center = (spread.max(axis=0) + spread.min(axis=0)) / 2 * scale
@@ -739,7 +770,14 @@ def process_pair(
     # 가릴 수 있어 각각의 틀을 쓴다. 기준점만 있는 모드는 그 판정을 할 수 없으므로
     # 예전처럼 "흰 여백이 없는 최대 사각형"으로 남겨둔다.
     if manual_points is None:
-        facing = _front_is_right(before_canonical_points)
+        facing, facing_disagreed = _pair_facing(
+            before_canonical_points, after_canonical_points
+        )
+        if facing_disagreed:
+            warnings.append(
+                "전/후 사진의 고개 각도가 서로 달라 정면·측면 판정이 갈렸습니다. "
+                "결과의 여백을 확인해주세요."
+            )
         final_box = _fixed_frame_box(facing)
         before_box = after_box = final_box
         logger.info("frame: %s 고정 틀 %s", "정면" if facing is None else "측면", final_box)
