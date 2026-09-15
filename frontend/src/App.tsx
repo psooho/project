@@ -46,6 +46,11 @@ const API_BASE_URL = "";
 // 백엔드 파이프라인(backend/app/main.py의 process_pair, PRD 6.2~6.5)에서 이뤄진다.
 type ManualPoints = { before: NormalizedPoint[]; after: NormalizedPoint[] };
 
+/** 서버가 이유를 알려줬으면 그걸 쓰고, 아니면 준비된 문구를 쓴다. */
+function messageOf(cause: unknown, fallback: string) {
+  return cause instanceof Error && cause.message ? cause.message : fallback;
+}
+
 /** 백엔드가 "얼굴을 못 찾았다"고 알려주는 경고인지. 이때만 직접 지정 화면을 권한다. */
 function isFaceMissing(warnings: string[]) {
   return warnings.some((warning) => warning.includes("얼굴을 찾지 못해"));
@@ -106,7 +111,15 @@ async function processPair(
     window.location.reload();
     throw new Error("암호가 변경되었습니다.");
   }
-  if (!res.ok) throw new Error("서버 처리에 실패했습니다.");
+  if (!res.ok) {
+    // 서버가 왜 안 되는지 알려주는 경우가 있다 (기준점이 서로 안 맞는다 등).
+    // 그걸 그대로 보여줘야 사용자가 무엇을 고쳐야 할지 안다.
+    const detail = await res
+      .json()
+      .then((body: { detail?: string }) => body.detail)
+      .catch(() => undefined);
+    throw new Error(detail || "서버 처리에 실패했습니다.");
+  }
 
   const data: { before: string; after: string; warnings?: string[] } = await res.json();
   const [beforeBlob, afterBlob] = await Promise.all([
@@ -397,8 +410,8 @@ function App() {
       setStatus("done");
       if (points) setPicking(false);
       else if (!isFaceMissing(shown.warnings)) resetPicking();
-    } catch {
-      setError("변환 중 문제가 발생했습니다. 다시 시도해주세요.");
+    } catch (cause) {
+      setError(messageOf(cause, "변환 중 문제가 발생했습니다. 다시 시도해주세요."));
       setStatus("idle");
     }
   }
@@ -422,8 +435,8 @@ function App() {
       setShowingMosaic(true);
       clearGif();
       setMosaicStatus("done");
-    } catch {
-      setError("모자이크 처리 중 문제가 발생했습니다. 다시 시도해주세요.");
+    } catch (cause) {
+      setError(messageOf(cause, "모자이크 처리 중 문제가 발생했습니다. 다시 시도해주세요."));
       setMosaicStatus("idle");
     }
   }
@@ -468,8 +481,8 @@ function App() {
         current = pendingAdjust.current;
         pendingAdjust.current = null;
       }
-    } catch {
-      setError("조절에 실패했습니다. 다시 시도해주세요.");
+    } catch (cause) {
+      setError(messageOf(cause, "조절에 실패했습니다. 다시 시도해주세요."));
     } finally {
       pendingAdjust.current = null;
       setAdjustBusy(false);

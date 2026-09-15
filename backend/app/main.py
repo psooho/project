@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 
 from .animation import build_crossfade_gif
-from .pipeline import process_pair
+from .pipeline import UnusableResult, process_pair
 from .suggest import can_level, is_available as suggest_available, matched_points
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -175,18 +175,22 @@ async def process(
     before_bgr = _upload_to_bgr(await before.read())
     after_bgr = _upload_to_bgr(await after.read())
 
-    result_before, result_after, warnings = await run_in_threadpool(
-        process_pair,
-        before_bgr,
-        after_bgr,
-        mosaic,
-        manual_points,
-        scale_adjust,
-        level,
-        brightness_strength,
-        tone_strength,
-        PREVIEW_WIDTH if preview else 0,
-    )
+    try:
+        result_before, result_after, warnings = await run_in_threadpool(
+            process_pair,
+            before_bgr,
+            after_bgr,
+            mosaic,
+            manual_points,
+            scale_adjust,
+            level,
+            brightness_strength,
+            tone_strength,
+            PREVIEW_WIDTH if preview else 0,
+        )
+    except UnusableResult as exc:
+        # 잘못된 입력이지 서버 오류가 아니다. 500 대신 이유를 돌려준다.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     quality = PREVIEW_JPEG_QUALITY if preview else 92
     return {

@@ -147,6 +147,18 @@ SKIN_YCRCB_LOW = (0, 133, 77)
 SKIN_YCRCB_HIGH = (255, 173, 127)
 # 피부로 잡힌 픽셀이 이 비율보다 적으면 신뢰할 수 없다고 보고 프레임 전체로 되돌린다.
 SKIN_MIN_COVERAGE = 0.05
+# 결과가 이보다 작아지면 쓸 수 없는 것으로 보고 이유를 알린다. 전/후 기준점이 서로 맞지
+# 않으면 두 사진이 겹치는 영역이 사라지는데, 그대로 두면 빈 이미지가 만들어져 변환이
+# 죽는다. 죽는 대신 무엇이 잘못됐는지 말해주는 게 낫다.
+MIN_RESULT_SIZE_PX = 32
+# 전/후 기준점이 벌어진 정도가 이 배수 이상 차이나면 같은 자리를 찍은 게 아니라고 본다.
+# 두 장은 같은 사람을 비슷한 거리에서 찍은 것이라 간격이 그렇게까지 다를 수 없다.
+# 이 상태로 맞추면 한쪽이 극단적으로 작게 얹혀 결과가 쓸모없어진다.
+MANUAL_SPREAD_RATIO_WARN = 2.5
+
+
+class UnusableResult(Exception):
+    """입력이 잘못돼 쓸 만한 결과를 만들 수 없을 때. 사용자에게 그대로 보여줄 문구를 담는다."""
 
 
 def _landmark_center(points: np.ndarray, indices: list[int]) -> np.ndarray:
@@ -701,6 +713,17 @@ def process_pair(
             warnings.append(
                 "전/후 사진의 기준점이 서로 잘 맞지 않습니다. 같은 자리를 찍었는지 확인해주세요."
             )
+        # 두 사진의 기준점이 벌어진 정도를 비교한다. 크게 다르면 서로 다른 자리를 찍은
+        # 것이고, 그대로 맞추면 한쪽이 극단적으로 작게 얹혀 결과가 못 쓰게 된다.
+        after_spread = float(np.linalg.norm(after_anchors.max(axis=0) - after_anchors.min(axis=0)))
+        if spread > 0 and after_spread > 0:
+            ratio = max(spread, after_spread) / min(spread, after_spread)
+            if ratio >= MANUAL_SPREAD_RATIO_WARN:
+                warnings.append(
+                    f"전/후 기준점의 간격이 {ratio:.1f}배 차이납니다. 두 사진에서 서로 다른 "
+                    "자리를 찍었을 수 있습니다 — 확인 후 다시 찍어주세요."
+                )
+            logger.info("manual: spread ratio %.2f (before=%.0f after=%.0f)", ratio, spread, after_spread)
         logger.info("manual: %d points, residual=%.1fpx (spread=%.1fpx)", len(before_anchors), residual, spread)
         # 미세조정은 정렬된 기준점 자리를 중심으로 한다 — 그래야 크기만 변하고 위치는 그대로다.
         alignment_pivot = _apply_transform(
@@ -743,11 +766,18 @@ def process_pair(
     if after_warning:
         warnings.append(f"후 사진: {after_warning}")
 
-    # 크롭이 반드시 품고 있어야 할 기준점. 자동 모드는 눈썹 중앙(캔버스에 고정)이고,
-    # 수동 모드는 사진을 캔버스 한가운데 맞춰뒀으므로 캔버스 중심을 쓴다.
-    crop_anchor = (
-        CROP_ANCHOR if manual_points is None else (CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2)
-    )
+    # 크롭이 반드시 품고 있어야 할 기준점. 자동 모드는 눈썹 중앙(캔버스에 고정)이다.
+    #
+    # 수동 모드는 예전에 캔버스 중심을 썼는데, 이건 "두 사진을 합친 영역"의 중심이라
+    # 개별 사진이 그 점을 안 덮을 수 있다. 전/후 기준점 간격이 크게 다르면(오클릭으로
+    # 한쪽만 좁게 찍는 경우) 한 사진이 훨씬 작게 얹히면서 중심을 비껴가고, 그러면
+    # _max_valid_margins가 한 점으로 무너져 빈 이미지가 만들어지고 변환이 통째로 죽었다.
+    # 찍은 기준점들의 평균은 정의상 두 사진 안에 있으므로 그 문제가 없다.
+    if manual_points is None:
+        crop_anchor = CROP_ANCHOR
+    else:
+        anchor_centroid = np.vstack([before_alignment_points, after_alignment_points]).mean(axis=0)
+        crop_anchor = (float(anchor_centroid[0]), float(anchor_centroid[1]))
 
     # 여백이 사진마다 같도록 정해진 틀로 자른다. 자동 모드는 얼굴 윤곽으로 정면/측면을
     # 가릴 수 있어 각각의 틀을 쓴다. 기준점만 있는 모드는 그 판정을 할 수 없으므로
@@ -863,6 +893,14 @@ def process_pair(
             logger.info("frame: %s 사진 덮는 비율 %.1f%%", name, 100 * (1 - filled))
 
     logger.info("crop: before=%s after=%s -> using=%s (canvas=%dx%d)", before_box, after_box, final_box, CANVAS_WIDTH, CANVAS_HEIGHT)
+    if (
+        final_box[2] - final_box[0] < MIN_RESULT_SIZE_PX
+        or final_box[3] - final_box[1] < MIN_RESULT_SIZE_PX
+    ):
+        raise UnusableResult(
+            "전/후 사진에서 찍은 기준점이 서로 맞지 않아 겹치는 부분이 거의 없습니다. "
+            "두 사진에서 같은 자리를 찍었는지 확인해주세요."
+        )
     aligned_before, before_canonical_points = _crop_to_box(aligned_before, before_canonical_points, final_box)
     aligned_after, after_canonical_points = _crop_to_box(aligned_after, after_canonical_points, final_box)
 
