@@ -27,10 +27,12 @@ from .landmarks import (
 # 잡아둬야 확대된 헤어라인·뒤통수까지도 캔버스 밖으로 밀려나지 않는다.
 # (크롭 최소 배율(MIN_CROP_SCALE) 같은 걸로 타협하면 패딩이 남아 테두리가 다시
 # 삐뚤어지므로, 캔버스를 넉넉히 키워서 패딩 없는 크롭만으로 해결한다.)
-CANVAS_WIDTH = 1800
-CANVAS_HEIGHT = 1700
-TARGET_LEFT_BROW = np.array([820.0, 750.0], dtype=np.float32)
-TARGET_RIGHT_BROW = np.array([980.0, 750.0], dtype=np.float32)
+# 얼굴 세로 높이를 700px에 맞춰 얹으므로, 고정 틀(측면은 폭이 얼굴 높이의 1.7배)이
+# 잘리지 않을 만큼 넉넉해야 한다. 좁으면 틀 좌표가 캔버스 밖으로 나가 크롭이 깨진다.
+CANVAS_WIDTH = 2400
+CANVAS_HEIGHT = 2200
+TARGET_LEFT_BROW = np.array([1160.0, 900.0], dtype=np.float32)
+TARGET_RIGHT_BROW = np.array([1240.0, 900.0], dtype=np.float32)
 CROP_ANCHOR = ((TARGET_LEFT_BROW[0] + TARGET_RIGHT_BROW[0]) / 2, TARGET_LEFT_BROW[1])
 
 # 측면 사진에서 "얼굴 앞쪽"(코·턱이 있는 방향) 여백이 "뒤쪽"(귀 방향)보다 필요 이상으로
@@ -86,10 +88,18 @@ MAX_TRUSTED_ROTATION_DEG = 45.0
 # 값은 실제 사진 20장(정면 11, 측면 9)의 분포를 보고, 대부분의 사진이 원본만으로 틀을
 # 채울 수 있는 선에서 잡았다. 모자라는 사진만 가장자리를 늘여 메운다 — 넉넉하게 잡을수록
 # 여백은 시원하지만 늘인 자국이 보이므로, 실측 최솟값 바로 위에서 멈춘다.
-FRONTAL_FRAME = (1.45, 1.45, 2.0, 0.6)   # (앞/왼쪽, 뒤/오른쪽, 위, 아래)
-SIDE_FRAME = (1.25, 3.2, 2.4, 1.45)      # 측면은 뒤통수 쪽을 훨씬 넓게 잡는다
-# 눈썹 간격 (캔버스 좌표계). 위 배수의 기준이다.
-BROW_SPAN = float(TARGET_RIGHT_BROW[0] - TARGET_LEFT_BROW[0])
+FRONTAL_FRAME = (0.81, 0.81, 1.11, 0.33)   # (앞/왼쪽, 뒤/오른쪽, 위, 아래)
+SIDE_FRAME = (0.42, 1.30, 0.81, 0.49)      # 측면은 뒤통수 쪽을 훨씬 넓게 잡는다
+
+# 크기를 맞추는 기준은 "얼굴 세로 높이"다. 눈썹 간격을 쓰면 측면에서 어긋난다 — 고개를
+# 돌린 각도만큼 눈썹 사이가 원근으로 짧아지기 때문이다(실측: 얼굴 높이 대비 눈썹 간격이
+# 정면은 1.80배인데 측면은 2.95배). 전/후의 고개 각도가 조금만 달라도 배율이 틀어져서,
+# 한쪽만 귀가 잘리거나 여백이 달라졌다. 세로 거리는 좌우 회전에 영향받지 않는다.
+# 실측으로 전/후 어긋남이 6.5% -> 2.6%로 줄었다.
+#
+# 목표 높이를 크게 잡으면 결과물 해상도가 그만큼 올라간다. 원본이 대부분 이보다 크므로
+# 대개 축소만 일어난다 (예전에는 눈썹 160px에 맞추느라 0.15~0.7배로 줄여 버렸다).
+TARGET_FACE_HEIGHT = 700.0
 # 고정 틀을 원본이 이 비율 이상 못 덮으면 알려준다. 모자란 만큼은 가장자리를 늘여 메우는데,
 # 조금이면 티가 안 나지만 넓어지면 번진 자국이 보인다 — 그때는 더 넓게 찍는 게 답이다.
 FRAME_FILL_WARN_RATIO = 0.03
@@ -176,12 +186,32 @@ def _lift_front(transform: np.ndarray, points: np.ndarray | None) -> np.ndarray:
     return stacked[:2].astype(np.float32)
 
 
+def _face_height(points: np.ndarray) -> float:
+    """얼굴 윤곽의 세로 길이. 좌우로 고개를 돌려도 거의 변하지 않아 크기 기준으로 쓴다."""
+    oval_y = points[FACE_OVAL_RING][:, 1]
+    return max(1.0, float(oval_y.max() - oval_y.min()))
+
+
 def _brow_transform(points: np.ndarray) -> np.ndarray:
-    """자동 모드: 두 눈썹을 캔버스의 고정 위치에 놓는 변환."""
+    """자동 모드의 정렬 변환.
+
+    각도는 두 눈썹을 잇는 선에서, 크기는 얼굴 세로 높이에서 따로 가져온다. 예전에는 두
+    눈썹을 캔버스의 고정 두 점에 그대로 얹어서 각도와 크기를 한꺼번에 정했는데, 그러면
+    측면에서 고개 각도에 따라 눈썹 간격이 달라지는 게 그대로 배율 오차가 됐다."""
     screen_left_brow, screen_right_brow = _screen_ordered_brows(points)
-    src = np.array([screen_left_brow, screen_right_brow], dtype=np.float32)
-    dst = np.array([TARGET_LEFT_BROW, TARGET_RIGHT_BROW], dtype=np.float32)
-    transform, _ = cv2.estimateAffinePartial2D(src, dst)
+    direction = np.asarray(screen_right_brow, dtype=np.float64) - np.asarray(
+        screen_left_brow, dtype=np.float64
+    )
+    angle = np.arctan2(direction[1], direction[0])
+    scale = TARGET_FACE_HEIGHT / _face_height(points)
+
+    cos, sin = np.cos(-angle) * scale, np.sin(-angle) * scale
+    linear = np.array([[cos, -sin], [sin, cos]], dtype=np.float64)
+    brow_mid = (np.asarray(screen_left_brow, dtype=np.float64)
+                + np.asarray(screen_right_brow, dtype=np.float64)) / 2
+    offset = np.asarray(CROP_ANCHOR, dtype=np.float64) - linear @ brow_mid
+
+    transform = np.hstack([linear, offset.reshape(2, 1)]).astype(np.float32)
     return _lift_front(transform, points)
 
 
@@ -400,13 +430,14 @@ def _fixed_frame_box(front_is_right: bool | None) -> tuple[int, int, int, int]:
     front, back, top, bottom = FRONTAL_FRAME if front_is_right is None else SIDE_FRAME
     left, right = (back, front) if front_is_right else (front, back)
 
-    center_x = (TARGET_LEFT_BROW[0] + TARGET_RIGHT_BROW[0]) / 2
-    brow_y = float(TARGET_LEFT_BROW[1])
+    center_x, brow_y = CROP_ANCHOR
+    # 캔버스를 벗어나면 잘라낸다. 음수 좌표로 슬라이스하면 파이썬이 뒤에서부터 세어
+    # 엉뚱한 영역을 집는다 (예전에 여백을 넓혔다가 크롭이 깨진 적이 있다).
     return (
-        int(round(center_x - left * BROW_SPAN)),
-        int(round(brow_y - top * BROW_SPAN)),
-        int(round(center_x + right * BROW_SPAN)),
-        int(round(brow_y + bottom * BROW_SPAN)),
+        max(0, int(round(center_x - left * TARGET_FACE_HEIGHT))),
+        max(0, int(round(brow_y - top * TARGET_FACE_HEIGHT))),
+        min(CANVAS_WIDTH, int(round(center_x + right * TARGET_FACE_HEIGHT))),
+        min(CANVAS_HEIGHT, int(round(brow_y + bottom * TARGET_FACE_HEIGHT))),
     )
 
 
