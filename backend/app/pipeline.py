@@ -810,22 +810,32 @@ def process_pair(
         # 눈썹이 잘렸다(실측: 80%에서 여유 17px, 70%에서 2.8px). 그래서 어느 쪽이든
         # "키우는" 방향으로만 적용한다.
         #
-        # 확대 기준점은 크롭의 "아래 + 얼굴 앞쪽" 모서리다. 그 바깥은 어차피 잘려 나가는
-        # 영역이라, 확대해도 안쪽(위·뒤통수 쪽)으로만 커지고 눈썹과 얼굴 앞 여백은 제자리에
-        # 남는다. 예전에는 가로 기준점이 눈썹 중앙이라 얼굴 앞쪽이 밖으로 밀려났다
-        # (실측: 130%에서 앞 여백이 19.9% -> 13.7%로 줄었다).
-        #
-        # 앞쪽이 어느 쪽인지는 기준점 위치로 정한다 — 눈썹은 머리 앞쪽에 있으므로,
-        # 기준점이 더 가까이 붙어 있는 가장자리가 얼굴 앞이다.
-        pivot_x = alignment_pivot[0]
-        if before_alignment_points is not None and after_alignment_points is not None:
+        # 어디를 고정하고 키울지는 모드에 따라 다르다.
+        if manual_points is None:
+            # 자동 모드: 눈썹을 고정한다. 전/후 눈썹이 계속 같은 자리에 있어야 비교가
+            # 성립하는데, 눈썹에서 떨어진 점을 기준으로 키우면 그만큼 한쪽만 밀린다.
+            # 크롭이 고정 틀이고 눈썹은 그 안쪽(아래 가장자리에서 정면 231px, 측면 343px
+            # 위)에 있어서, 눈썹을 기준으로 키워도 프레임 밖으로 밀려날 일이 없다.
+            #
+            # 예전에는 세로 기준점이 조건 없이 크롭 하단이라 후 사진이 통째로 위로
+            # 올라갔다 (실측: 측면 130%에서 68.6px, 160%에서 205.8px — 화면 높이의 23%).
+            pivot = np.asarray(alignment_pivot, dtype=np.float64)
+        else:
+            # 수동 모드: 눈썹이 크롭의 "아래 + 얼굴 앞쪽" 모서리에 바짝 붙어 있다. 사진이
+            # 눈썹 바로 아래에서 끝나기 때문인데, 그래서 그 모서리를 고정해야 확대해도
+            # 눈썹과 얼굴 앞 여백이 프레임 안에 남는다. 그 바깥은 어차피 잘려 나간다.
+            # (예전에 눈썹 중앙을 기준으로 키웠더니 130%에서 앞 여백이 19.9% -> 13.7%로
+            # 줄었고, 눈썹 아래쪽이 잘렸다.)
+            #
+            # 앞쪽이 어느 쪽인지는 기준점 위치로 정한다 — 눈썹은 머리 앞쪽에 있으므로,
+            # 기준점이 더 가까이 붙어 있는 가장자리가 얼굴 앞이다.
             anchors_x = np.concatenate(
                 [before_alignment_points[:, 0], after_alignment_points[:, 0]]
             )
             to_left = float(anchors_x.min()) - final_box[0]
             to_right = final_box[2] - float(anchors_x.max())
             pivot_x = float(final_box[0] if to_left <= to_right else final_box[2])
-        pivot = np.array([pivot_x, float(final_box[3])], dtype=np.float64)
+            pivot = np.array([pivot_x, float(final_box[3])], dtype=np.float64)
         if scale_adjust > 1.0:
             after_transform = _compose(_scale_about(pivot, scale_adjust), after_transform)
             aligned_after, after_canonical_points, after_valid_mask, after_warning = _align_to_canonical(
