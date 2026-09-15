@@ -75,6 +75,25 @@ FRONT_LIFT_DEG = 3.2
 # 회전 보정이 이 각도를 넘으면 정렬 신뢰도가 낮다고 보고 경고만 남긴다 (PRD 6.2).
 MAX_TRUSTED_ROTATION_DEG = 45.0
 
+# --- 고정 틀 ------------------------------------------------------------------
+# 결과물의 여백을 사진마다 똑같이 맞추기 위한 틀. 눈썹 간격(캔버스에서 160px)의 배수로
+# 적는다 — 눈썹은 이미 캔버스 고정 위치에 놓이므로, 이 배수가 곧 "얼굴 대비 여백"이 된다.
+#
+# 예전에는 "흰 여백이 전혀 없는 최대 사각형"으로 잘랐다. 그러면 원본에 남아 있는 영역에
+# 따라 결과가 달라져서, 실측해보니 같은 정면 사진끼리도 오른쪽 여백이 1.0~1.7배, 아래가
+# 0.35~1.1배로 흔들렸다. 직원들이 "사진마다 여백이 제각각"이라고 지적한 게 이것이다.
+#
+# 값은 실제 사진 20장(정면 11, 측면 9)의 분포를 보고, 대부분의 사진이 원본만으로 틀을
+# 채울 수 있는 선에서 잡았다. 모자라는 사진만 가장자리를 늘여 메운다 — 넉넉하게 잡을수록
+# 여백은 시원하지만 늘인 자국이 보이므로, 실측 최솟값 바로 위에서 멈춘다.
+FRONTAL_FRAME = (1.45, 1.45, 2.0, 0.6)   # (앞/왼쪽, 뒤/오른쪽, 위, 아래)
+SIDE_FRAME = (1.25, 3.2, 2.4, 1.45)      # 측면은 뒤통수 쪽을 훨씬 넓게 잡는다
+# 눈썹 간격 (캔버스 좌표계). 위 배수의 기준이다.
+BROW_SPAN = float(TARGET_RIGHT_BROW[0] - TARGET_LEFT_BROW[0])
+# 고정 틀을 원본이 이 비율 이상 못 덮으면 알려준다. 모자란 만큼은 가장자리를 늘여 메우는데,
+# 조금이면 티가 안 나지만 넓어지면 번진 자국이 보인다 — 그때는 더 넓게 찍는 게 답이다.
+FRAME_FILL_WARN_RATIO = 0.03
+
 # --- 수동 2점 모드 -----------------------------------------------------------
 # 이마·헤어라인만 크게 찍은 클로즈업은 눈·코·입이 프레임 밖이라 MediaPipe가 얼굴을
 # 아예 못 찾는다(실측: 이런 사진 16장 중 15장 실패, 검출 임계값을 0.01까지 낮추고
@@ -373,6 +392,24 @@ def _max_valid_margins(valid_mask: np.ndarray, anchor: tuple[float, float]) -> t
     return box_at(scale)
 
 
+def _fixed_frame_box(front_is_right: bool | None) -> tuple[int, int, int, int]:
+    """여백이 항상 같도록 정해진 크기로 자를 영역을 돌려준다.
+
+    front_is_right가 None이면 정면, 아니면 측면이다. 측면은 코가 향하는 쪽을 "앞"으로
+    보고 그쪽을 좁게, 뒤통수 쪽을 넓게 잡는다."""
+    front, back, top, bottom = FRONTAL_FRAME if front_is_right is None else SIDE_FRAME
+    left, right = (back, front) if front_is_right else (front, back)
+
+    center_x = (TARGET_LEFT_BROW[0] + TARGET_RIGHT_BROW[0]) / 2
+    brow_y = float(TARGET_LEFT_BROW[1])
+    return (
+        int(round(center_x - left * BROW_SPAN)),
+        int(round(brow_y - top * BROW_SPAN)),
+        int(round(center_x + right * BROW_SPAN)),
+        int(round(brow_y + bottom * BROW_SPAN)),
+    )
+
+
 def _adjust_side_margins(
     box: tuple[int, int, int, int],
     points_list: list[np.ndarray | None],
@@ -667,25 +704,46 @@ def process_pair(
         CROP_ANCHOR if manual_points is None else (CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2)
     )
 
-    # 회전으로 생긴 흰 패딩 쐐기가 안 보이도록, 두 사진 다 패딩이 전혀 없는 영역까지만
-    # 남기고 잘라낸다. 가로/세로 각 방향을 독립적으로 넓힌 뒤, 두 사진 모두에게
-    # 안전한(패딩이 안 걸리는) 교집합 영역으로 맞춘다 — 그래야 두 결과의 크기가 같아진다.
-    before_box = _max_valid_margins(before_valid_mask, crop_anchor)
-    after_box = _max_valid_margins(after_valid_mask, crop_anchor)
-    final_box = (
-        max(before_box[0], after_box[0]),
-        max(before_box[1], after_box[1]),
-        min(before_box[2], after_box[2]),
-        min(before_box[3], after_box[3]),
-    )
-    final_box = _adjust_side_margins(
-        final_box,
-        [before_canonical_points, after_canonical_points],
-        crop_anchor[0],
-        FRONT_MARGIN_TRIM_RATIO,
-        BACK_MARGIN_EXTEND_RATIO,
-        CANVAS_WIDTH,
-    )
+    # 여백이 사진마다 같도록 정해진 틀로 자른다. 자동 모드는 얼굴 윤곽으로 정면/측면을
+    # 가릴 수 있어 각각의 틀을 쓴다. 기준점만 있는 모드는 그 판정을 할 수 없으므로
+    # 예전처럼 "흰 여백이 없는 최대 사각형"으로 남겨둔다.
+    if manual_points is None:
+        facing = _front_is_right(before_canonical_points)
+        final_box = _fixed_frame_box(facing)
+        before_box = after_box = final_box
+        logger.info("frame: %s 고정 틀 %s", "정면" if facing is None else "측면", final_box)
+
+        # 원본이 틀을 얼마나 덮는지 확인한다. 모자란 부분은 가장자리를 늘여 메우므로
+        # 결과는 나오지만, 넓으면 번진 자국이 보인다.
+        left, top, right, bottom = final_box
+        for name, mask in (("전", before_valid_mask), ("후", after_valid_mask)):
+            window = mask[max(0, top) : bottom, max(0, left) : right]
+            covered = float((window > 0).mean()) if window.size else 0.0
+            outside = (right - left) * (bottom - top) - window.size
+            missing = 1.0 - (covered * window.size) / max(1, (right - left) * (bottom - top))
+            if missing > FRAME_FILL_WARN_RATIO:
+                warnings.append(
+                    f"{name} 사진이 기준 틀보다 좁아 가장자리 {missing:.0%}를 늘여 채웠습니다. "
+                    "더 넓게 찍으면 깨끗해집니다."
+                )
+            logger.info("frame: %s 사진 덮는 비율 %.1f%% (밖 %d px)", name, 100 * (1 - missing), max(0, outside))
+    else:
+        before_box = _max_valid_margins(before_valid_mask, crop_anchor)
+        after_box = _max_valid_margins(after_valid_mask, crop_anchor)
+        final_box = (
+            max(before_box[0], after_box[0]),
+            max(before_box[1], after_box[1]),
+            min(before_box[2], after_box[2]),
+            min(before_box[3], after_box[3]),
+        )
+        final_box = _adjust_side_margins(
+            final_box,
+            [before_canonical_points, after_canonical_points],
+            crop_anchor[0],
+            FRONT_MARGIN_TRIM_RATIO,
+            BACK_MARGIN_EXTEND_RATIO,
+            CANVAS_WIDTH,
+        )
     if abs(scale_adjust - 1.0) > 1e-6:
         # 배율은 두 사진의 "상대" 크기다. 그래서 후 사진을 줄이는 대신 전 사진을 그만큼
         # 키워도 결과는 같은데, 축소는 부작용이 두 가지 있다 — 사진이 캔버스를 덜 덮어
@@ -728,20 +786,23 @@ def process_pair(
             before_alignment_points = _apply_transform(before_anchors, before_transform)
             after_alignment_points = _apply_transform(after_anchors, after_transform)
 
-        final_box = (
-            max(before_box[0], after_box[0]),
-            max(before_box[1], after_box[1]),
-            min(before_box[2], after_box[2]),
-            min(before_box[3], after_box[3]),
-        )
-        final_box = _adjust_side_margins(
-            final_box,
-            [before_canonical_points, after_canonical_points],
-            crop_anchor[0],
-            FRONT_MARGIN_TRIM_RATIO,
-            BACK_MARGIN_EXTEND_RATIO,
-            CANVAS_WIDTH,
-        )
+        # 자동 모드는 틀이 고정이라 배율을 바꿔도 크롭을 다시 잡지 않는다. 다시 잡으면
+        # 사진마다 여백이 달라져서 고정 틀을 쓰는 의미가 없어진다.
+        if manual_points is not None:
+            final_box = (
+                max(before_box[0], after_box[0]),
+                max(before_box[1], after_box[1]),
+                min(before_box[2], after_box[2]),
+                min(before_box[3], after_box[3]),
+            )
+            final_box = _adjust_side_margins(
+                final_box,
+                [before_canonical_points, after_canonical_points],
+                crop_anchor[0],
+                FRONT_MARGIN_TRIM_RATIO,
+                BACK_MARGIN_EXTEND_RATIO,
+                CANVAS_WIDTH,
+            )
         logger.info(
             "scale adjust: x%.3f applied to %s (pivot y=%.0f)",
             scale_adjust, "after" if scale_adjust > 1 else "before", pivot[1],
