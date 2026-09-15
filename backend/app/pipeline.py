@@ -35,18 +35,9 @@ TARGET_LEFT_BROW = np.array([1160.0, 900.0], dtype=np.float32)
 TARGET_RIGHT_BROW = np.array([1240.0, 900.0], dtype=np.float32)
 CROP_ANCHOR = ((TARGET_LEFT_BROW[0] + TARGET_RIGHT_BROW[0]) / 2, TARGET_LEFT_BROW[1])
 
-# 측면 사진에서 "얼굴 앞쪽"(코·턱이 있는 방향) 여백이 "뒤쪽"(귀 방향)보다 필요 이상으로
-# 넓게 나오는 경향이 있어, 그쪽만 줄이고 반대쪽(귀 뒤쪽)은 오히려 조금 더 넓힌다.
-# 뒤쪽을 넓히는 건 패딩 없는 크롭 범위를 넘어설 수 있어(흰 여백이 살짝 보일 수 있음),
-# 필요하다고 확인된 만큼만 적용한다. 정면 사진처럼 좌우가 비슷하면 이 보정 자체를
-# 건너뛴다 (자세한 조건은 _adjust_side_margins 참고).
-FRONT_MARGIN_TRIM_RATIO = 0.6
-BACK_MARGIN_EXTEND_RATIO = 0.93
+# 얼굴 윤곽이 좌우로 이만큼 이상 비대칭이면 측면으로 본다. 옆모습은 귀 쪽 윤곽이 코 쪽보다
+# 훨씬 멀리 뻗기 때문이다. 정면/측면에 따라 쓰는 틀이 달라진다.
 SIDE_ASYMMETRY_THRESHOLD = 0.2
-
-# 정면 사진은 위 앞/뒤 보정을 건너뛰는데, 그러면 원본이 살짝 치우쳐 찍혔을 때 화면 왼쪽
-# 여백이 넓어 보인다. 정면일 때는 화면 왼쪽(보는 사람 기준) 여백만 이만큼으로 줄인다.
-FRONTAL_LEFT_TRIM_RATIO = 0.90
 
 # 눈썹 아래 경계선. 양수면 눈썹 아래로 여유를 두고(그만큼 눈이 노출될 수 있음),
 # 음수면 눈썹 하단을 살짝 파고든다(그만큼 눈썹 일부가 가려질 수 있음). 눈은 확실히
@@ -78,12 +69,14 @@ FRONT_LIFT_DEG = 3.2
 MAX_TRUSTED_ROTATION_DEG = 45.0
 
 # --- 고정 틀 ------------------------------------------------------------------
-# 결과물의 여백을 사진마다 똑같이 맞추기 위한 틀. 눈썹 간격(캔버스에서 160px)의 배수로
-# 적는다 — 눈썹은 이미 캔버스 고정 위치에 놓이므로, 이 배수가 곧 "얼굴 대비 여백"이 된다.
+# 결과물의 여백을 사진마다 똑같이 맞추기 위한 틀. 단위는 아래 TARGET_FACE_HEIGHT(얼굴
+# 세로 높이)의 배수다 — 얼굴은 항상 그 높이에 맞춰 캔버스 고정 위치에 놓이므로, 이 배수가
+# 곧 "얼굴 대비 여백"이 된다. 예컨대 0.81이면 얼굴 높이의 81%만큼 여백을 둔다는 뜻이다.
 #
 # 예전에는 "흰 여백이 전혀 없는 최대 사각형"으로 잘랐다. 그러면 원본에 남아 있는 영역에
-# 따라 결과가 달라져서, 실측해보니 같은 정면 사진끼리도 오른쪽 여백이 1.0~1.7배, 아래가
-# 0.35~1.1배로 흔들렸다. 직원들이 "사진마다 여백이 제각각"이라고 지적한 게 이것이다.
+# 따라 결과가 달라져서, 실측해보니 같은 정면 사진끼리도 오른쪽 여백이 얼굴 높이의
+# 0.56~0.94배, 아래가 0.19~0.61배로 흔들렸다. 직원들이 "사진마다 여백이 제각각"이라고
+# 지적한 게 이것이다.
 #
 # 값은 실제 사진 20장(정면 11, 측면 9)의 분포를 보고, 대부분의 사진이 원본만으로 틀을
 # 채울 수 있는 선에서 잡았다. 모자라는 사진만 가장자리를 늘여 메운다 — 넉넉하게 잡을수록
@@ -103,6 +96,30 @@ TARGET_FACE_HEIGHT = 700.0
 # 고정 틀을 원본이 이 비율 이상 못 덮으면 알려준다. 모자란 만큼은 가장자리를 늘여 메우는데,
 # 조금이면 티가 안 나지만 넓어지면 번진 자국이 보인다 — 그때는 더 넓게 찍는 게 답이다.
 FRAME_FILL_WARN_RATIO = 0.03
+
+
+def _check_frames_fit_canvas() -> None:
+    """틀이 캔버스 안에 들어가는지 시작할 때 확인한다.
+
+    넘치면 예전에는 조용히 잘라내서, 뜻한 것보다 좁은 틀이 그대로 나갔다. 여백을 같게
+    맞추는 게 이 틀의 존재 이유인데 그게 소리 없이 깨지면 알아차리기 어렵다. 여유는
+    생각보다 빠듯하다 — 눈썹이 캔버스 위에서 y=900에 놓이므로 위쪽은 얼굴 높이의 1.28배뿐이다."""
+    center_x, brow_y = CROP_ANCHOR
+    room = {
+        "좌우": min(center_x, CANVAS_WIDTH - center_x) / TARGET_FACE_HEIGHT,
+        "위": brow_y / TARGET_FACE_HEIGHT,
+        "아래": (CANVAS_HEIGHT - brow_y) / TARGET_FACE_HEIGHT,
+    }
+    for name, (front, back, top, bottom) in (("정면", FRONTAL_FRAME), ("측면", SIDE_FRAME)):
+        for need, side in ((max(front, back), "좌우"), (top, "위"), (bottom, "아래")):
+            if need > room[side]:
+                raise ValueError(
+                    f"{name} 틀의 {side} 여백 {need}가 캔버스 여유 {room[side]:.2f}를 넘습니다. "
+                    f"CANVAS_WIDTH/CANVAS_HEIGHT를 키우거나 틀을 줄여주세요."
+                )
+
+
+_check_frames_fit_canvas()
 
 # --- 수동 2점 모드 -----------------------------------------------------------
 # 이마·헤어라인만 크게 찍은 클로즈업은 눈·코·입이 프레임 밖이라 MediaPipe가 얼굴을
@@ -462,56 +479,22 @@ def _fixed_frame_box(front_is_right: bool | None) -> tuple[int, int, int, int]:
     left, right = (back, front) if front_is_right else (front, back)
 
     center_x, brow_y = CROP_ANCHOR
-    # 캔버스를 벗어나면 잘라낸다. 음수 좌표로 슬라이스하면 파이썬이 뒤에서부터 세어
-    # 엉뚱한 영역을 집는다 (예전에 여백을 넓혔다가 크롭이 깨진 적이 있다).
-    return (
-        max(0, int(round(center_x - left * TARGET_FACE_HEIGHT))),
-        max(0, int(round(brow_y - top * TARGET_FACE_HEIGHT))),
-        min(CANVAS_WIDTH, int(round(center_x + right * TARGET_FACE_HEIGHT))),
-        min(CANVAS_HEIGHT, int(round(brow_y + bottom * TARGET_FACE_HEIGHT))),
+    box = (
+        int(round(center_x - left * TARGET_FACE_HEIGHT)),
+        int(round(brow_y - top * TARGET_FACE_HEIGHT)),
+        int(round(center_x + right * TARGET_FACE_HEIGHT)),
+        int(round(brow_y + bottom * TARGET_FACE_HEIGHT)),
     )
-
-
-def _adjust_side_margins(
-    box: tuple[int, int, int, int],
-    points_list: list[np.ndarray | None],
-    anchor_x: float,
-    front_trim_ratio: float,
-    back_extend_ratio: float,
-    canvas_width: int,
-) -> tuple[int, int, int, int]:
-    """측면 사진처럼 얼굴 윤곽(FACE_OVAL)이 좌우로 뚜렷하게 비대칭일 때만 적용한다.
-    앵커에서 덜 뻗어나간 쪽을 "얼굴 앞쪽"으로 보고, 그쪽 여백은 front_trim_ratio만큼
-    줄이고 반대쪽(귀 뒤쪽)은 back_extend_ratio만큼 넓힌다. 뒤쪽을 넓히는 건 캔버스의
-    흰 여백 영역까지 쓸 수 있어 안전하게 슬라이스된다.
-    (처음엔 "더 멀리 뻗은 쪽 = 앞쪽"으로 가정했는데 실제로는 반대였다 — 옆모습에서는
-    볼·턱 실루엣이 넓게 퍼지는 귀 쪽 윤곽이 코 쪽보다 오히려 더 멀리 뻗는다.)
-
-    정면 사진은 좌우 윤곽이 거의 대칭이라, 아주 작은 차이만으로 한쪽을 "앞쪽"으로
-    판정해버리면 오히려 없던 비대칭을 만들어낸다. ASYMMETRY_THRESHOLD 이상 차이날
-    때만 앞/뒤 보정을 하고, 정면일 때는 화면 왼쪽 여백만 조금 줄인다."""
-    if any(points is None for points in points_list):
-        # 수동 2점 모드: 얼굴 윤곽이 없어 앞/뒤도 정면 여부도 판정할 수 없다. 근거 없이
-        # 한쪽을 깎으면 오히려 치우치므로 여백은 그대로 둔다.
-        return box
-
-    ax = anchor_x
-    left_reach = max(ax - points[FACE_OVAL_RING][:, 0].min() for points in points_list)
-    right_reach = max(points[FACE_OVAL_RING][:, 0].max() - ax for points in points_list)
-
-    left, top, right, bottom = box
-    longer, shorter = max(left_reach, right_reach), min(left_reach, right_reach)
-    if longer == 0 or (longer - shorter) / longer < SIDE_ASYMMETRY_THRESHOLD:
-        # 정면: 앞/뒤 구분이 무의미하므로 그 보정은 하지 않고, 화면 왼쪽 여백만 살짝 줄인다.
-        return int(ax - (ax - left) * FRONTAL_LEFT_TRIM_RATIO), top, right, bottom
-
-    if left_reach <= right_reach:
-        left = int(ax - (ax - left) * front_trim_ratio)
-        right = min(canvas_width, int(ax + (right - ax) * back_extend_ratio))
-    else:
-        right = int(ax + (right - ax) * front_trim_ratio)
-        left = max(0, int(ax - (ax - left) * back_extend_ratio))
-    return left, top, right, bottom
+    # 시작할 때 _check_frames_fit_canvas로 막아두지만, 반올림 한 픽셀 차이까지 대비해
+    # 캔버스 안으로 자른다. 음수 좌표로 슬라이스하면 파이썬이 뒤에서부터 세어 엉뚱한
+    # 영역을 집기 때문에 그냥 두면 크롭이 통째로 깨진다.
+    clamped = (
+        max(0, box[0]), max(0, box[1]),
+        min(CANVAS_WIDTH, box[2]), min(CANVAS_HEIGHT, box[3]),
+    )
+    if clamped != box:
+        logger.warning("frame: 틀이 캔버스를 벗어나 잘렸다 %s -> %s", box, clamped)
+    return clamped
 
 
 def _crop_to_box(image: np.ndarray, points: np.ndarray | None, box: tuple[int, int, int, int]) -> tuple[np.ndarray, np.ndarray | None]:
@@ -781,21 +764,6 @@ def process_pair(
         final_box = _fixed_frame_box(facing)
         before_box = after_box = final_box
         logger.info("frame: %s 고정 틀 %s", "정면" if facing is None else "측면", final_box)
-
-        # 원본이 틀을 얼마나 덮는지 확인한다. 모자란 부분은 가장자리를 늘여 메우므로
-        # 결과는 나오지만, 넓으면 번진 자국이 보인다.
-        left, top, right, bottom = final_box
-        for name, mask in (("전", before_valid_mask), ("후", after_valid_mask)):
-            window = mask[max(0, top) : bottom, max(0, left) : right]
-            covered = float((window > 0).mean()) if window.size else 0.0
-            outside = (right - left) * (bottom - top) - window.size
-            missing = 1.0 - (covered * window.size) / max(1, (right - left) * (bottom - top))
-            if missing > FRAME_FILL_WARN_RATIO:
-                warnings.append(
-                    f"{name} 사진이 기준 틀보다 좁아 가장자리 {missing:.0%}를 늘여 채웠습니다. "
-                    "더 넓게 찍으면 깨끗해집니다."
-                )
-            logger.info("frame: %s 사진 덮는 비율 %.1f%% (밖 %d px)", name, 100 * (1 - missing), max(0, outside))
     else:
         before_box = _max_valid_margins(before_valid_mask, crop_anchor)
         after_box = _max_valid_margins(after_valid_mask, crop_anchor)
@@ -804,14 +772,6 @@ def process_pair(
             max(before_box[1], after_box[1]),
             min(before_box[2], after_box[2]),
             min(before_box[3], after_box[3]),
-        )
-        final_box = _adjust_side_margins(
-            final_box,
-            [before_canonical_points, after_canonical_points],
-            crop_anchor[0],
-            FRONT_MARGIN_TRIM_RATIO,
-            BACK_MARGIN_EXTEND_RATIO,
-            CANVAS_WIDTH,
         )
     if abs(scale_adjust - 1.0) > 1e-6:
         # 배율은 두 사진의 "상대" 크기다. 그래서 후 사진을 줄이는 대신 전 사진을 그만큼
@@ -864,14 +824,6 @@ def process_pair(
                 min(before_box[2], after_box[2]),
                 min(before_box[3], after_box[3]),
             )
-            final_box = _adjust_side_margins(
-                final_box,
-                [before_canonical_points, after_canonical_points],
-                crop_anchor[0],
-                FRONT_MARGIN_TRIM_RATIO,
-                BACK_MARGIN_EXTEND_RATIO,
-                CANVAS_WIDTH,
-            )
         logger.info(
             "scale adjust: x%.3f applied to %s (pivot y=%.0f)",
             scale_adjust, "after" if scale_adjust > 1 else "before", pivot[1],
@@ -892,6 +844,23 @@ def process_pair(
                 "crop: 눈썹 아래 여백 확보 %d -> %d (필요 %d)", final_box[3], widened, int(needed)
             )
             final_box = (final_box[0], final_box[1], final_box[2], widened)
+
+    # 원본이 틀을 얼마나 덮는지 확인한다. 모자란 부분은 가장자리를 늘여 메우므로 결과는
+    # 나오지만, 넓으면 번진 자국이 보인다. 배율 조정까지 끝난 뒤에 재야 실제와 맞는다 —
+    # 예전에는 조정 전에 재서, 슬라이더를 움직여 덮임이 늘어난 뒤에도 옛 수치를 그대로
+    # 안내했다.
+    if manual_points is None:
+        left, top, right, bottom = final_box
+        area = max(1, (right - left) * (bottom - top))
+        for name, mask in (("전", before_valid_mask), ("후", after_valid_mask)):
+            window = mask[top:bottom, left:right]
+            filled = 1.0 - float((window > 0).sum()) / area
+            if filled > FRAME_FILL_WARN_RATIO:
+                warnings.append(
+                    f"{name} 사진이 기준 틀보다 좁아 가장자리 {filled:.0%}를 늘여 채웠습니다. "
+                    "더 넓게 찍으면 깨끗해집니다."
+                )
+            logger.info("frame: %s 사진 덮는 비율 %.1f%%", name, 100 * (1 - filled))
 
     logger.info("crop: before=%s after=%s -> using=%s (canvas=%dx%d)", before_box, after_box, final_box, CANVAS_WIDTH, CANVAS_HEIGHT)
     aligned_before, before_canonical_points = _crop_to_box(aligned_before, before_canonical_points, final_box)
