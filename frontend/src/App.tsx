@@ -47,6 +47,38 @@ const API_BASE_URL = "";
 type ManualPoints = { before: NormalizedPoint[]; after: NormalizedPoint[] };
 
 /** 서버가 이유를 알려줬으면 그걸 쓰고, 아니면 준비된 문구를 쓴다. */
+/** 서버에 폼을 보낸다. 응답을 못 받은 경우와 암호가 바뀐 경우를 여기서 한 번에 처리한다.
+ *
+ *  서버가 죽었거나 연결이 끊기면 fetch는 응답 없이 실패하고, 브라우저가 "Failed to fetch"
+ *  (사파리는 "Load failed") 같은 영어 문구를 던진다. 그게 그대로 화면에 떴었다. */
+async function postForm(path: string, formData: FormData): Promise<Response> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}${path}`, {
+      method: "POST",
+      headers: { "X-App-Password": getStoredPassword() },
+      body: formData,
+    });
+  } catch {
+    throw new Error("서버와 연결이 끊겼습니다. 잠시 후 다시 시도해주세요.");
+  }
+  if (res.status === 401) {
+    // 암호가 바뀐 경우. 저장된 암호를 지우고 새로고침하면 다시 입력 화면이 뜬다.
+    clearStoredPassword();
+    window.location.reload();
+    throw new Error("암호가 변경되었습니다.");
+  }
+  return res;
+}
+
+/** 서버가 이유를 주지 않은 실패를 상황에 맞는 말로. 운영 서버(Cloud Run)는 요청이 너무
+ *  크면 413을, 인스턴스가 죽거나 재시작 중이면 502~504를 앱 대신 직접 돌려준다. */
+function failureMessage(status: number) {
+  if (status === 413) return "사진 용량이 너무 큽니다. 크기를 줄여서 다시 올려주세요.";
+  if (status >= 502 && status <= 504) return "서버가 잠시 응답하지 않습니다. 잠시 후 다시 시도해주세요.";
+  return "처리 중 예상치 못한 문제가 생겼습니다. 다시 시도해주세요.";
+}
+
 function messageOf(cause: unknown, fallback: string) {
   return cause instanceof Error && cause.message ? cause.message : fallback;
 }
@@ -100,25 +132,15 @@ async function processPair(
     );
   }
 
-  const res = await fetch(`${API_BASE_URL}/api/process`, {
-    method: "POST",
-    headers: { "X-App-Password": getStoredPassword() },
-    body: formData,
-  });
-  if (res.status === 401) {
-    // 암호가 바뀐 경우. 저장된 암호를 지우고 새로고침하면 다시 입력 화면이 뜬다.
-    clearStoredPassword();
-    window.location.reload();
-    throw new Error("암호가 변경되었습니다.");
-  }
+  const res = await postForm("/api/process", formData);
   if (!res.ok) {
-    // 서버가 왜 안 되는지 알려주는 경우가 있다 (기준점이 서로 안 맞는다 등).
+    // 서버가 왜 안 되는지 알려주는 경우가 있다 (기준점이 서로 안 맞는다, 파일이 깨졌다 등).
     // 그걸 그대로 보여줘야 사용자가 무엇을 고쳐야 할지 안다.
     const detail = await res
       .json()
       .then((body: { detail?: string }) => body.detail)
       .catch(() => undefined);
-    throw new Error(detail || "서버 처리에 실패했습니다.");
+    throw new Error(detail || failureMessage(res.status));
   }
 
   const data: { before: string; after: string; warnings?: string[] } = await res.json();
@@ -175,16 +197,7 @@ async function buildGif(before: Blob, after: Blob): Promise<Blob> {
   formData.append("before", before, "before.jpg");
   formData.append("after", after, "after.jpg");
 
-  const res = await fetch(`${API_BASE_URL}/api/gif`, {
-    method: "POST",
-    headers: { "X-App-Password": getStoredPassword() },
-    body: formData,
-  });
-  if (res.status === 401) {
-    clearStoredPassword();
-    window.location.reload();
-    throw new Error("암호가 변경되었습니다.");
-  }
+  const res = await postForm("/api/gif", formData);
   if (!res.ok) throw new Error("GIF 생성에 실패했습니다.");
   return res.blob();
 }

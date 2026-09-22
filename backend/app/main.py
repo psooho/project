@@ -12,10 +12,10 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Respons
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .animation import build_crossfade_gif
-from .pipeline import UnusableResult, process_pair
+from .pipeline import MAX_INPUT_SIDE, UnusableResult, process_pair
 from .suggest import can_level, is_available as suggest_available, matched_points
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -70,11 +70,53 @@ app.add_middleware(
 FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
 
-def _upload_to_bgr(data: bytes) -> np.ndarray:
-    # 휴대폰 사진은 픽셀을 눕혀서 저장하고 "돌려서 보여라"는 EXIF 태그만 붙이는 경우가
-    # 많다. PIL은 그 태그를 자동 적용하지 않으므로, 그대로 쓰면 옆으로 누운 얼굴이
-    # 들어가 얼굴 검출에 실패한다.
-    image = ImageOps.exif_transpose(Image.open(BytesIO(data))).convert("RGB")
+# 크기는 _upload_to_bgr에서 직접 검사한다. PIL 기본 한계(1억 8천만 화소)는 파일을 열자마자
+# 거절해서, 줄여서 풀면 충분히 쓸 수 있는 큰 JPEG까지 막아버린다.
+Image.MAX_IMAGE_PIXELS = None
+# 줄여서 풀 수 없는 형식(PNG 등)은 이 화소 수까지만 받는다. 통째로 풀어야 하고, 풀고 나서도
+# 변환 과정에서 복사본이 서너 벌 생긴다 (2,500만 화소면 한 벌에 75MB).
+MAX_UNREDUCIBLE_PIXELS = 25_000_000
+
+
+def _upload_to_bgr(data: bytes, side: str) -> np.ndarray:
+    """업로드된 파일을 BGR 배열로 푼다. 열 수 없으면 이유를 담아 400을 낸다.
+
+    side는 "전"/"후" — 사용자가 어느 사진을 바꿔야 하는지 알 수 있게 문구에 넣는다."""
+    try:
+        image = Image.open(BytesIO(data))
+        width, height = image.size
+        longest = max(width, height)
+        if longest > MAX_INPUT_SIDE:
+            # 여기서 줄이지 않으면 통째로 푼 뒤에야 줄일 수 있다. 4725x29451 스크롤 캡처는
+            # 푸는 데만 1,479MB를 써서, 1Gi인 운영 서버에서는 인스턴스가 죽는다.
+            # JPEG는 헤더만 읽은 이 시점에 1/2~1/8 크기로 바로 풀 수 있다 (draft). 다른
+            # 형식은 draft가 아무 일도 안 하므로 크기가 그대로 남고, 아래 검사에 걸린다.
+            ratio = MAX_INPUT_SIDE / longest
+            image.draft("RGB", (max(1, int(width * ratio)), max(1, int(height * ratio))))
+            if image.size[0] * image.size[1] > MAX_UNREDUCIBLE_PIXELS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{side} 사진이 너무 큽니다 ({width}x{height}). "
+                    "크기를 줄이거나 JPG로 저장해서 다시 올려주세요.",
+                )
+        # 휴대폰 사진은 픽셀을 눕혀서 저장하고 "돌려서 보여라"는 EXIF 태그만 붙이는 경우가
+        # 많다. PIL은 그 태그를 자동 적용하지 않으므로, 그대로 쓰면 옆으로 누운 얼굴이
+        # 들어가 얼굴 검출에 실패한다.
+        image = ImageOps.exif_transpose(image).convert("RGB")
+    except (HTTPException, MemoryError):
+        # 메모리 부족은 파일 탓이 아니다. "손상된 파일"로 안내하면 엉뚱한 걸 고치게 된다.
+        raise
+    except Exception as exc:
+        # 사진이 아닌 파일, 중간에 잘린 파일, 서버가 모르는 형식(HEIC 등). 사용자의 파일
+        # 문제라 500이 아니라 400으로, 무엇을 하면 되는지 알려준다. 형식별 예외가
+        # 제각각이라(UnidentifiedImageError, OSError, SyntaxError, struct.error...)
+        # 넓게 잡되, 원인은 로그에 남긴다.
+        logger.warning("%s 사진을 열 수 없음 (%d bytes): %r", side, len(data), exc)
+        raise HTTPException(
+            status_code=400,
+            detail=f"{side} 사진 파일을 열 수 없습니다. 사진이 아니거나 손상된 파일입니다. "
+            "JPG로 다시 저장해서 올려주세요.",
+        ) from exc
     return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
 
@@ -172,8 +214,8 @@ async def process(
             status_code=400,
             detail=f"크기 조정은 {MIN_SCALE_ADJUST:.0%}~{MAX_SCALE_ADJUST:.0%} 사이여야 합니다.",
         )
-    before_bgr = _upload_to_bgr(await before.read())
-    after_bgr = _upload_to_bgr(await after.read())
+    before_bgr = _upload_to_bgr(await before.read(), "전")
+    after_bgr = _upload_to_bgr(await after.read(), "후")
 
     try:
         result_before, result_after, warnings = await run_in_threadpool(
@@ -235,8 +277,22 @@ async def make_gif(before: UploadFile = File(...), after: UploadFile = File(...)
 
     이미 변환이 끝난 두 장을 그대로 받는다. 원본을 다시 받아 정렬·보정을 다시 돌리면
     시간이 오래 걸리고, 화면에 보이는 결과(모자이크 적용 여부 포함)와 달라질 수 있다."""
-    before_image = Image.open(BytesIO(await before.read()))
-    after_image = Image.open(BytesIO(await after.read()))
+    images = []
+    for side, upload in (("전", before), ("후", after)):
+        # 정상이라면 이 앱이 만든 결과 JPEG가 온다. 그 밖의 것은 이유를 알려주고 거절한다.
+        try:
+            image = Image.open(BytesIO(await upload.read()))
+            if image.size[0] * image.size[1] > MAX_UNREDUCIBLE_PIXELS:
+                raise ValueError(f"too large: {image.size}")
+            image.load()
+        except Exception as exc:
+            logger.warning("GIF: %s 사진을 열 수 없음: %r", side, exc)
+            raise HTTPException(
+                status_code=400,
+                detail=f"GIF를 만들 {side} 사진을 열 수 없습니다. 변환을 다시 해주세요.",
+            ) from exc
+        images.append(image)
+    before_image, after_image = images
 
     gif_bytes = await run_in_threadpool(build_crossfade_gif, before_image, after_image)
     return Response(content=gif_bytes, media_type="image/gif")

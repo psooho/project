@@ -1,7 +1,9 @@
 import { useRef, useState } from "react";
 import type { DragEvent } from "react";
 
-const ACCEPTED_TYPES = ["image/jpeg", "image/png", "image/heic", "image/heif"];
+// HEIC는 받지 않는다. 서버가 풀 수 없고, 윈도우 크롬은 미리보기조차 못 띄워서 기준점을
+// 찍을 수도 없다. 받는 형식에서 빼두면 아이폰 사파리는 올릴 때 JPG로 바꿔서 보낸다.
+const ACCEPTED_TYPES = ["image/jpeg", "image/png"];
 
 interface PhotoDropzoneProps {
   label: string;
@@ -13,7 +15,11 @@ interface PhotoDropzoneProps {
 
 function isAcceptedFile(file: File) {
   if (ACCEPTED_TYPES.includes(file.type)) return true;
-  return /\.(jpe?g|png|heic|heif)$/i.test(file.name);
+  return /\.(jpe?g|png)$/i.test(file.name);
+}
+
+function isHeic(file: File) {
+  return /^image\/hei[cf]$/.test(file.type) || /\.hei[cf]$/i.test(file.name);
 }
 
 export function PhotoDropzone({ label, file, onChange, resultUrl }: PhotoDropzoneProps) {
@@ -27,7 +33,11 @@ export function PhotoDropzone({ label, file, onChange, resultUrl }: PhotoDropzon
     const picked = files?.[0];
     if (!picked) return;
     if (!isAcceptedFile(picked)) {
-      setError("JPG, PNG, HEIC 파일만 업로드할 수 있습니다.");
+      setError(
+        isHeic(picked)
+          ? "HEIC(아이폰 기본 형식)는 열 수 없습니다. JPG로 바꾸거나 카카오톡으로 받아서 올려주세요."
+          : "JPG, PNG 파일만 업로드할 수 있습니다.",
+      );
       return;
     }
     setError(null);
@@ -76,14 +86,14 @@ export function PhotoDropzone({ label, file, onChange, resultUrl }: PhotoDropzon
           <div className="dropzone-placeholder">
             <span className="dropzone-icon">＋</span>
             <span>클릭하거나 파일을 끌어다 놓으세요</span>
-            <span className="dropzone-hint">JPG · PNG · HEIC</span>
+            <span className="dropzone-hint">JPG · PNG</span>
           </div>
         )}
       </div>
       <input
         ref={inputRef}
         type="file"
-        accept=".jpg,.jpeg,.png,.heic,.heif,image/*"
+        accept=".jpg,.jpeg,.png,image/jpeg,image/png"
         hidden
         onChange={(e) => handleFiles(e.target.files)}
       />
