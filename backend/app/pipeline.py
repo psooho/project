@@ -700,13 +700,6 @@ def _blend_mosaic(image: np.ndarray, mosaic_mask: np.ndarray) -> np.ndarray:
     return np.clip(blended, 0, 255).astype(np.uint8)
 
 
-def _apply_brush_mosaic(image: np.ndarray, strokes: list[BrushStroke]) -> np.ndarray:
-    """붓으로 칠한 자리만 흐리게 만든다. 칠한 게 없으면 원본 그대로 돌려준다."""
-    if not strokes:
-        return image
-    return _blend_mosaic(image, _brush_mask(image.shape[:2], strokes))
-
-
 def mosaic_only(
     image_bgr: np.ndarray, strokes: list[BrushStroke], face: bool = True
 ) -> tuple[np.ndarray, str | None]:
@@ -765,7 +758,6 @@ def process_pair(
     brightness_strength: float = 1.0,
     tone_strength: float = 1.0,
     preview_width: int = 0,
-    source_strokes: tuple[list[BrushStroke], list[BrushStroke]] | None = None,
     result_strokes: tuple[list[BrushStroke], list[BrushStroke]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """전/후 사진을 같은 크기·각도·밝기로 맞춘다.
@@ -784,9 +776,8 @@ def process_pair(
     level_points는 기준점들을 잇는 선을 수평으로 맞출지 여부다. 눈썹 위치를 자동으로 찾은
     경우처럼 그 점들이 무엇인지 알 때만 켠다.
 
-    source_strokes는 원본 사진 위에 칠한 자국이다. 정렬 전에 입히므로 얼굴을 따라 같이
-    돌아가고 확대된다. result_strokes는 결과 사진 위에 칠한 자국이라 마지막에 그대로
-    입힌다 — 보고 칠한 자리에 그대로 남는다. 둘 다 (전, 후) 순서다.
+    result_strokes는 결과 사진 위에 붓으로 칠한 자국이다 ((전, 후) 순서). 크롭까지 끝난
+    뒤에 입히므로, 보고 칠한 자리에 그대로 남는다.
 
     scale_adjust는 후 사진만 그만큼 더 키우거나 줄인다. 두 사진의 고개 각도가 다르면
     2D 변환으로는 어떤 기준점을 써도 한쪽이 틀어진다 — 눈썹을 맞추면 두상이 안 맞고
@@ -843,21 +834,11 @@ def process_pair(
         if after_points is None:
             warnings.append("후 사진에서 얼굴을 찾지 못해 원본을 그대로 반환합니다.")
         if before_points is None or after_points is None:
-            # 정렬은 포기해도 칠한 자국까지 버리면 안 된다.
-            if source_strokes is not None:
-                before_bgr = _apply_brush_mosaic(before_bgr, source_strokes[0])
-                after_bgr = _apply_brush_mosaic(after_bgr, source_strokes[1])
             return before_bgr, after_bgr, warnings
 
         before_transform = _brow_transform(before_points)
         after_transform = _brow_transform(after_points)
         alignment_pivot = np.array(CROP_ANCHOR, dtype=np.float64)
-
-    # 원본에 칠한 자국은 정렬 전에 입힌다. 그래야 사진을 돌리고 키울 때 얼굴을 따라 같이
-    # 움직인다. 얼굴 검출은 위에서 이미 끝난 뒤라 흐려져도 검출에는 영향이 없다.
-    if source_strokes is not None:
-        before_bgr = _apply_brush_mosaic(before_bgr, source_strokes[0])
-        after_bgr = _apply_brush_mosaic(after_bgr, source_strokes[1])
 
     aligned_before, before_canonical_points, before_valid_mask, before_warning = _align_to_canonical(
         before_bgr, before_transform, before_points

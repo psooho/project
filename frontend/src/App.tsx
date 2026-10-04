@@ -111,7 +111,7 @@ async function processPair(
   brightnessStrength = 1,
   toneStrength = 1,
   preview = false,
-  strokes?: { source?: StrokeSides; result?: StrokeSides },
+  strokes?: StrokeSides,
 ): Promise<Results> {
   const formData = new FormData();
   formData.append("before", before);
@@ -125,10 +125,8 @@ async function processPair(
   formData.append("tone_strength", String(toneStrength));
   // 끄는 도중에는 작게 줄인 결과를 받는다 (서버 계산 181ms -> 60ms, 전송량도 크게 줄어든다).
   formData.append("preview", String(preview));
-  // 원본에 칠한 자국은 정렬 전에 들어가 얼굴을 따라 움직이고, 결과에 칠한 자국은 마지막에
-  // 들어가 보고 칠한 자리에 그대로 남는다.
-  if (hasStrokes(strokes?.source)) formData.append("source_strokes", JSON.stringify(strokes!.source));
-  if (hasStrokes(strokes?.result)) formData.append("result_strokes", JSON.stringify(strokes!.result));
+  // 결과 위에 칠한 자국. 크롭까지 끝난 뒤에 입혀 보고 칠한 자리에 그대로 남는다.
+  if (hasStrokes(strokes)) formData.append("result_strokes", JSON.stringify(strokes));
   if (manual) {
     formData.append(
       "points",
@@ -304,19 +302,12 @@ function App() {
   const [strokesBackup, setStrokesBackup] = useState<StrokeSides>(EMPTY_STROKES);
   const [brushRadius, setBrushRadius] = useState(0.05);
   const [maskFace, setMaskFace] = useState(true);
-  const [mosaicOnlyResult, setMosaicOnlyResult] = useState<{
-    before: { blob: Blob; url: string };
-    after: { blob: Blob; url: string } | null;
-  } | null>(null);
   const [mosaicOnlyBusy, setMosaicOnlyBusy] = useState(false);
   // 칠하기 화면에 띄울 "자동 모자이크까지 들어간" 미리보기. 칠하기 전에 얼굴이 이미
   // 가려진 모습을 봐야, 어디를 더 칠해야 하는지 알 수 있다.
   const [facePreview, setFacePreview] = useState<{ before: string; after: string | null } | null>(null);
   const [facePreviewBusy, setFacePreviewBusy] = useState(false);
   const [facePreviewNotice, setFacePreviewNotice] = useState<string | null>(null);
-  // 칠하기 화면에서 "얼굴도 자동으로 가리기"를 켠 채 변환까지 갔는지. 그랬다면 이후의
-  // 모든 재계산(밝기·색감·크기)에도 얼굴 모자이크를 계속 넣어야 결과가 유지된다.
-  const [bakedFaceMosaic, setBakedFaceMosaic] = useState(false);
 
   const displayed = showingMosaic && mosaicResult ? mosaicResult : baseResult;
 
@@ -335,9 +326,9 @@ function App() {
     };
   }, [beforePhoto, afterPhoto]);
 
-  /** 변환 요청에 같이 보낼 붓 자국. */
+  /** 변환 요청에 같이 보낼, 결과 위에 칠한 자국. */
   function strokePayload() {
-    return { source: sourceStrokes, result: resultStrokes };
+    return resultStrokes;
   }
 
   /** 지금 쓰는 기준점이 자동으로 찾아준 것 그대로인지 (사용자가 손대면 false). */
@@ -381,8 +372,6 @@ function App() {
     setSourceStrokes(EMPTY_STROKES);
     setResultStrokes(EMPTY_STROKES);
     setPainting(null);
-    setBakedFaceMosaic(false);
-    clearMosaicOnly();
     clearFacePreview();
     clearGif();
   }
@@ -435,15 +424,14 @@ function App() {
     setError(null);
   }
 
-  async function handleTransform(manual?: ManualPoints, withFaceMosaic = false) {
+  async function handleTransform(manual?: ManualPoints) {
     if (!beforePhoto || !afterPhoto) return;
-    setBakedFaceMosaic(withFaceMosaic);
     setStatus("processing");
     setError(null);
     setSuggestFailed(false);
     try {
       const first = await processPair(
-        beforePhoto, afterPhoto, withFaceMosaic, manual, 1, isSuggested(manual),
+        beforePhoto, afterPhoto, false, manual, 1, isSuggested(manual),
         adjust.brightness, adjust.tone, false, strokePayload(),
       );
 
@@ -459,7 +447,7 @@ function App() {
             auto = {
               points,
               result: await processPair(
-                beforePhoto, afterPhoto, withFaceMosaic, points, 1, suggested.level,
+                beforePhoto, afterPhoto, false, points, 1, suggested.level,
                 adjust.brightness, adjust.tone, false, strokePayload(),
               ),
             };
@@ -560,7 +548,7 @@ function App() {
     try {
       for (;;) {
         const processed = await processPair(
-          beforePhoto, afterPhoto, bakedFaceMosaic, lastPoints, current.values.scale,
+          beforePhoto, afterPhoto, false, lastPoints, current.values.scale,
           isSuggested(lastPoints), current.values.brightness, current.values.tone,
           current.preview, strokePayload(),
         );
@@ -606,9 +594,9 @@ function App() {
   }
 
   /** 결과를 지금 값 그대로 다시 계산한다. 결과에 칠한 자국을 바꾼 뒤 반영할 때 쓴다. */
-  async function recomputeResult(faceMosaic?: boolean) {
+  async function recomputeResult() {
     if (!beforePhoto || !afterPhoto) return;
-    const useMosaic = faceMosaic ?? (showingMosaic || bakedFaceMosaic);
+    const useMosaic = showingMosaic;
     setAdjustBusy(true);
     setError(null);
     try {
@@ -694,42 +682,25 @@ function App() {
     clearFacePreview();
   }
 
-  /** 원본에 칠한 자국만 입혀서(정렬 없이) 결과를 받는다. */
-  async function handleMosaicOnly() {
+  /** 얼굴 자동 모자이크와 칠한 자국을 원본에 한 번에 입혀서 바로 내려받는다.
+   *
+   *  화면의 붓 자국은 브라우저가 그린 미리보기라, 저장할 파일은 여기서 서버에 한 번 더
+   *  요청해 원본 화질로 만든다. */
+  async function handleDownloadMosaic() {
     if (!beforePhoto) return;
     setMosaicOnlyBusy(true);
     setError(null);
     try {
       const result = await mosaicOnly(beforePhoto, afterPhoto, maskFace, sourceStrokes);
-      clearMosaicOnly();
-      setMosaicOnlyResult({
-        before: { blob: result.before, url: URL.createObjectURL(result.before) },
-        after: result.after ? { blob: result.after, url: URL.createObjectURL(result.after) } : null,
-      });
+      downloadBlob(result.before, withJpgName(beforePhoto.name, "mosaic"));
+      if (result.after && afterPhoto) {
+        downloadBlob(result.after, withJpgName(afterPhoto.name, "mosaic"));
+      }
       if (result.warnings.length > 0) setError(result.warnings.join(" "));
-      setPainting(null);
     } catch (cause) {
-      setError(messageOf(cause, "모자이크 처리에 실패했습니다. 다시 시도해주세요."));
+      setError(messageOf(cause, "모자이크 저장에 실패했습니다. 다시 시도해주세요."));
     } finally {
       setMosaicOnlyBusy(false);
-    }
-  }
-
-  function clearMosaicOnly() {
-    setMosaicOnlyResult((previous) => {
-      if (previous) {
-        URL.revokeObjectURL(previous.before.url);
-        if (previous.after) URL.revokeObjectURL(previous.after.url);
-      }
-      return null;
-    });
-  }
-
-  function handleDownloadMosaicOnly() {
-    if (!mosaicOnlyResult || !beforePhoto) return;
-    downloadBlob(mosaicOnlyResult.before.blob, withJpgName(beforePhoto.name, "mosaic"));
-    if (mosaicOnlyResult.after && afterPhoto) {
-      downloadBlob(mosaicOnlyResult.after.blob, withJpgName(afterPhoto.name, "mosaic"));
     }
   }
 
@@ -840,14 +811,13 @@ function App() {
       {painting && (
         <section className="brush-section">
           <h2 className="picker-title">
-            {painting === "source" ? "모자이크 칠하기 (원본)" : "모자이크 더 칠하기 (결과)"}
+            {painting === "source" ? "모자이크" : "모자이크 더 칠하기 (결과)"}
           </h2>
           <p className="picker-guide">
-            가리고 싶은 곳을 마우스로 끌어서 칠해주세요. 칠한 자리는 바로 흐려져 보이고,
-            최종 결과는 적용을 눌렀을 때 서버가 만듭니다.
+            더 가리고 싶은 곳을 마우스로 끌어서 칠해주세요. 칠한 자리는 바로 흐려져 보입니다.
             {painting === "source"
-              ? " 원본에 칠한 자국은 변환할 때 얼굴을 따라 같이 움직입니다."
-              : " 결과에 칠한 자국은 보이는 그 자리에 그대로 남습니다."}
+              ? " 저장할 파일은 다운로드를 누를 때 원본 화질로 다시 만듭니다."
+              : " '결과에 적용'을 누르면 최종본을 만들고, 그 뒤 밝기·색감·크기를 조절해도 자국은 남습니다."}
           </p>
           <div className="brush-controls">
             <label className="brush-size">
@@ -941,29 +911,14 @@ function App() {
           </div>
           <div className="actions">
             {painting === "source" ? (
-              <>
-                <button
-                  type="button"
-                  className="submit-btn"
-                  disabled={mosaicOnlyBusy}
-                  onClick={handleMosaicOnly}
-                >
-                  {mosaicOnlyBusy ? "처리 중..." : "모자이크만 적용하기"}
-                </button>
-                <button
-                  type="button"
-                  className="submit-btn submit-btn--secondary"
-                  disabled={!beforePhoto || !afterPhoto || status === "processing"}
-                  onClick={() => {
-                    setPainting(null);
-                    clearMosaicOnly();
-                    clearFacePreview();
-                    handleTransform(undefined, maskFace);
-                  }}
-                >
-                  이대로 사진 변환까지
-                </button>
-              </>
+              <button
+                type="button"
+                className="submit-btn"
+                disabled={mosaicOnlyBusy || facePreviewBusy}
+                onClick={handleDownloadMosaic}
+              >
+                {mosaicOnlyBusy ? "만드는 중..." : "다운로드"}
+              </button>
             ) : (
               <button
                 type="button"
@@ -978,37 +933,7 @@ function App() {
               </button>
             )}
             <button type="button" className="submit-btn submit-btn--secondary" onClick={cancelPainting}>
-              취소
-            </button>
-          </div>
-        </section>
-      )}
-
-      {mosaicOnlyResult && !painting && (
-        <section className="mosaic-only">
-          <h2 className="picker-title">모자이크만 적용한 사진</h2>
-          <p className="picker-guide">
-            전/후를 맞추지 않고 가리기만 한 결과입니다. 사진 크기와 구도는 원본 그대로입니다.
-          </p>
-          <div className="picker-grid">
-            <img src={mosaicOnlyResult.before.url} alt="모자이크만 적용한 전 사진" className="picker-image" />
-            {mosaicOnlyResult.after && (
-              <img src={mosaicOnlyResult.after.url} alt="모자이크만 적용한 후 사진" className="picker-image" />
-            )}
-          </div>
-          <div className="actions">
-            <button type="button" className="submit-btn" onClick={handleDownloadMosaicOnly}>
-              다운로드
-            </button>
-            <button
-              type="button"
-              className="submit-btn submit-btn--secondary"
-              onClick={() => startPainting("source")}
-            >
-              더 칠하기
-            </button>
-            <button type="button" className="submit-btn submit-btn--secondary" onClick={clearMosaicOnly}>
-              닫기
+              {painting === "source" ? "닫기" : "취소"}
             </button>
           </div>
         </section>
@@ -1104,7 +1029,7 @@ function App() {
       )}
 
       <div className="actions">
-        {status === "done" ? (
+        {painting ? null : status === "done" ? (
           <>
             <button type="button" className="submit-btn" onClick={handleDownload}>
               다운로드
@@ -1114,19 +1039,7 @@ function App() {
                 변환 취소
               </button>
             )}
-            {bakedFaceMosaic ? (
-              <button
-                type="button"
-                className="submit-btn submit-btn--secondary"
-                disabled={adjustBusy}
-                onClick={async () => {
-                  setBakedFaceMosaic(false);
-                  await recomputeResult(false);
-                }}
-              >
-                얼굴 모자이크 끄기
-              </button>
-            ) : usedManual ? null : showingMosaic ? (
+            {usedManual ? null : showingMosaic ? (
               <button type="button" className="submit-btn submit-btn--secondary" onClick={handleCancelMosaic}>
                 모자이크 취소
               </button>

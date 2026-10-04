@@ -243,20 +243,12 @@ async def process(
     brightness_strength: float = Form(1.0),
     tone_strength: float = Form(1.0),
     preview: bool = Form(False),
-    source_strokes: str = Form(""),
     result_strokes: str = Form(""),
 ) -> dict:
     manual_points = _parse_manual_points(points)
-    source = _parse_strokes(source_strokes, "원본에 칠한 자국")
     result = _parse_strokes(result_strokes, "결과에 칠한 자국")
-    if source or result:
-        logger.info(
-            "strokes: 원본 %d/%d, 결과 %d/%d",
-            len(source[0]) if source else 0,
-            len(source[1]) if source else 0,
-            len(result[0]) if result else 0,
-            len(result[1]) if result else 0,
-        )
+    if result:
+        logger.info("strokes: 결과에 칠한 자국 %d/%d", len(result[0]), len(result[1]))
     for name, value in (("밝기", brightness_strength), ("색감", tone_strength)):
         if not 0.0 <= value <= MAX_MATCH_STRENGTH:
             raise HTTPException(
@@ -283,7 +275,6 @@ async def process(
             brightness_strength,
             tone_strength,
             PREVIEW_WIDTH if preview else 0,
-            source,
             result,
         )
     except UnusableResult as exc:
