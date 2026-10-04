@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -58,6 +59,10 @@ MOSAIC_SIDE_TRIM_RATIO = 0.12
 MOSAIC_FEATURE_DILATE_RATIO = 0.06
 # 윤곽을 당기면서 눈·코 마스크와 얼굴 마스크 사이에 생기는 틈을 메우는 정도(닫기 연산).
 MOSAIC_CLOSE_RATIO = 0.05
+# 붓 반지름의 허용 범위 (사진 짧은 변 대비). 너무 작으면 한 점도 안 찍히고, 너무 크면
+# 한 번에 사진 전체가 덮인다.
+BRUSH_MIN_RADIUS_RATIO = 0.004
+BRUSH_MAX_RADIUS_RATIO = 0.5
 
 # 측면 사진에서 고개가 앞으로 숙여져 보이는 문제를 지각적으로 보정하는 각도.
 # 눈썹 중심선은 변환상 이미 정확히 수평이라, 숙여져 보이는 건 2D 회전으로는 없앨 수 없는
@@ -654,12 +659,38 @@ def _build_mosaic_mask(image_shape: tuple[int, int], points: np.ndarray) -> np.n
     return mosaic_mask
 
 
-def _apply_face_mosaic(image: np.ndarray, points: np.ndarray) -> np.ndarray:
-    mosaic_mask = _build_mosaic_mask(image.shape[:2], points)
+@dataclass(frozen=True)
+class BrushStroke:
+    """붓으로 한 번 그은 자국. 좌표는 사진 크기 대비 0~1 비율이고, 반지름은 짧은 변 대비
+    비율이다 — 화면에 줄여 띄운 사진 위에서 받으므로 픽셀로 주고받으면 어긋난다."""
 
-    # 마스크 자체를 블러 처리해서 0~255 사이의 부드러운 경계(그라데이션)로 만든 뒤,
-    # 그 값을 알파값 삼아 원본과 블러 이미지를 섞는다 — 마스크를 그대로 써서
-    # 딱 잘라 바꾸면 경계가 뚜렷하게 티가 난다.
+    points: tuple[tuple[float, float], ...]
+    radius: float
+
+
+def _brush_mask(shape: tuple[int, int], strokes: list[BrushStroke]) -> np.ndarray:
+    """붓으로 칠한 자리를 마스크로 만든다. 점만 찍은 자국(점 1개)도 동그랗게 남긴다."""
+    height, width = shape
+    mask = np.zeros(shape, dtype=np.uint8)
+    scale = min(height, width)
+    for stroke in strokes:
+        radius = max(1, int(round(stroke.radius * scale)))
+        pixels = [
+            (int(round(x * width)), int(round(y * height))) for x, y in stroke.points
+        ]
+        if len(pixels) > 1:
+            cv2.polylines(mask, [np.array(pixels, np.int32)], False, 255, radius * 2)
+        for pixel in pixels:
+            cv2.circle(mask, pixel, radius, 255, -1)
+    return mask
+
+
+def _blend_mosaic(image: np.ndarray, mosaic_mask: np.ndarray) -> np.ndarray:
+    """마스크가 가리키는 자리를 흐리게 만든다.
+
+    마스크 자체를 블러 처리해서 0~255 사이의 부드러운 경계(그라데이션)로 만든 뒤, 그 값을
+    알파값 삼아 원본과 블러 이미지를 섞는다 — 마스크를 그대로 써서 딱 잘라 바꾸면 경계가
+    뚜렷하게 티가 난다."""
     feather_kernel = _odd_kernel_size(mosaic_mask.shape, MOSAIC_FEATHER_RATIO)
     alpha = cv2.GaussianBlur(mosaic_mask, (feather_kernel, feather_kernel), 0).astype(np.float32) / 255.0
     alpha = alpha[:, :, None]
@@ -667,6 +698,36 @@ def _apply_face_mosaic(image: np.ndarray, points: np.ndarray) -> np.ndarray:
     blurred = _blur(image, MOSAIC_BLUR_KERNEL_RATIO)
     blended = image.astype(np.float32) * (1 - alpha) + blurred.astype(np.float32) * alpha
     return np.clip(blended, 0, 255).astype(np.uint8)
+
+
+def _apply_brush_mosaic(image: np.ndarray, strokes: list[BrushStroke]) -> np.ndarray:
+    """붓으로 칠한 자리만 흐리게 만든다. 칠한 게 없으면 원본 그대로 돌려준다."""
+    if not strokes:
+        return image
+    return _blend_mosaic(image, _brush_mask(image.shape[:2], strokes))
+
+
+def mosaic_only(
+    image_bgr: np.ndarray, strokes: list[BrushStroke], face: bool = True
+) -> tuple[np.ndarray, str | None]:
+    """정렬·크롭 없이 모자이크만 입힌다. 사진은 원래 크기·구도 그대로 돌려준다.
+
+    face를 켜면 얼굴을 찾아 눈·코·입을 자동으로 가리고, 붓으로 칠한 자리를 거기에 더한다.
+    얼굴을 못 찾아도 붓으로 칠한 자리는 그대로 적용하고, 못 찾았다는 사실만 알려준다."""
+    image_bgr = _limit_input_size(image_bgr)
+    mask = np.zeros(image_bgr.shape[:2], dtype=np.uint8)
+    warning = None
+    if face:
+        points = detect_landmarks(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
+        if points is None:
+            warning = "얼굴을 찾지 못해 자동 모자이크는 넣지 못했습니다. 가릴 곳을 직접 칠해주세요."
+        else:
+            mask = _build_mosaic_mask(image_bgr.shape[:2], points)
+    if strokes:
+        mask = np.maximum(mask, _brush_mask(image_bgr.shape[:2], strokes))
+    if not mask.any():
+        return image_bgr, warning
+    return _blend_mosaic(image_bgr, mask), warning
 
 
 ManualPoints = list[tuple[float, float]]
@@ -704,6 +765,8 @@ def process_pair(
     brightness_strength: float = 1.0,
     tone_strength: float = 1.0,
     preview_width: int = 0,
+    source_strokes: tuple[list[BrushStroke], list[BrushStroke]] | None = None,
+    result_strokes: tuple[list[BrushStroke], list[BrushStroke]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """전/후 사진을 같은 크기·각도·밝기로 맞춘다.
 
@@ -720,6 +783,10 @@ def process_pair(
 
     level_points는 기준점들을 잇는 선을 수평으로 맞출지 여부다. 눈썹 위치를 자동으로 찾은
     경우처럼 그 점들이 무엇인지 알 때만 켠다.
+
+    source_strokes는 원본 사진 위에 칠한 자국이다. 정렬 전에 입히므로 얼굴을 따라 같이
+    돌아가고 확대된다. result_strokes는 결과 사진 위에 칠한 자국이라 마지막에 그대로
+    입힌다 — 보고 칠한 자리에 그대로 남는다. 둘 다 (전, 후) 순서다.
 
     scale_adjust는 후 사진만 그만큼 더 키우거나 줄인다. 두 사진의 고개 각도가 다르면
     2D 변환으로는 어떤 기준점을 써도 한쪽이 틀어진다 — 눈썹을 맞추면 두상이 안 맞고
@@ -776,11 +843,21 @@ def process_pair(
         if after_points is None:
             warnings.append("후 사진에서 얼굴을 찾지 못해 원본을 그대로 반환합니다.")
         if before_points is None or after_points is None:
+            # 정렬은 포기해도 칠한 자국까지 버리면 안 된다.
+            if source_strokes is not None:
+                before_bgr = _apply_brush_mosaic(before_bgr, source_strokes[0])
+                after_bgr = _apply_brush_mosaic(after_bgr, source_strokes[1])
             return before_bgr, after_bgr, warnings
 
         before_transform = _brow_transform(before_points)
         after_transform = _brow_transform(after_points)
         alignment_pivot = np.array(CROP_ANCHOR, dtype=np.float64)
+
+    # 원본에 칠한 자국은 정렬 전에 입힌다. 그래야 사진을 돌리고 키울 때 얼굴을 따라 같이
+    # 움직인다. 얼굴 검출은 위에서 이미 끝난 뒤라 흐려져도 검출에는 영향이 없다.
+    if source_strokes is not None:
+        before_bgr = _apply_brush_mosaic(before_bgr, source_strokes[0])
+        after_bgr = _apply_brush_mosaic(after_bgr, source_strokes[1])
 
     aligned_before, before_canonical_points, before_valid_mask, before_warning = _align_to_canonical(
         before_bgr, before_transform, before_points
@@ -989,8 +1066,19 @@ def process_pair(
         tone_strength=tone_strength,
     )
 
+    # 얼굴 모자이크와 결과에 칠한 자국은 마스크를 합쳐 한 번에 입힌다. 따로 입히면 겹치는
+    # 자리가 두 번 흐려져 그 부분만 더 진해 보인다.
+    before_mask = np.zeros(aligned_before.shape[:2], dtype=np.uint8)
+    after_mask = np.zeros(matched_after.shape[:2], dtype=np.uint8)
     if apply_mosaic:
-        aligned_before = _apply_face_mosaic(aligned_before, before_canonical_points)
-        matched_after = _apply_face_mosaic(matched_after, after_canonical_points)
+        before_mask = _build_mosaic_mask(aligned_before.shape[:2], before_canonical_points)
+        after_mask = _build_mosaic_mask(matched_after.shape[:2], after_canonical_points)
+    if result_strokes is not None:
+        before_mask = np.maximum(before_mask, _brush_mask(before_mask.shape, result_strokes[0]))
+        after_mask = np.maximum(after_mask, _brush_mask(after_mask.shape, result_strokes[1]))
+    if before_mask.any():
+        aligned_before = _blend_mosaic(aligned_before, before_mask)
+    if after_mask.any():
+        matched_after = _blend_mosaic(matched_after, after_mask)
 
     return aligned_before, matched_after, warnings

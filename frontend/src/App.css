@@ -491,3 +491,89 @@
   font-size: 0.75rem;
   margin-top: -0.35rem;
 }
+
+/* 모자이크 붓 -------------------------------------------------------------- */
+
+.brush-section,
+.mosaic-only {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 1.25rem;
+  margin-bottom: 1.25rem;
+}
+
+.brush-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.brush-size {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: #374151;
+}
+
+.brush-size input {
+  width: 160px;
+}
+
+.brush-face {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: #374151;
+}
+
+.brush {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.brush-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.brush-label {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.brush-count {
+  font-size: 0.78rem;
+  color: #6b7280;
+  margin-right: auto;
+}
+
+/* 캔버스를 사진 위에 정확히 겹쳐야 칠한 자리가 어긋나지 않는다. 그래서 사진 크기에
+   테두리나 여백을 주지 않고, 캔버스는 좌상단에 절대 배치한다. */
+.brush-stage {
+  position: relative;
+  display: block;
+  line-height: 0;
+}
+
+.brush-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+
+.brush-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-radius: 8px;
+  cursor: crosshair;
+  touch-action: none;
+}

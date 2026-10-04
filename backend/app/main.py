@@ -15,7 +15,15 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .animation import build_crossfade_gif
-from .pipeline import MAX_INPUT_SIDE, UnusableResult, process_pair
+from .pipeline import (
+    BRUSH_MAX_RADIUS_RATIO,
+    BRUSH_MIN_RADIUS_RATIO,
+    MAX_INPUT_SIDE,
+    BrushStroke,
+    UnusableResult,
+    mosaic_only,
+    process_pair,
+)
 from .suggest import can_level, is_available as suggest_available, matched_points
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -157,6 +165,40 @@ MAX_MATCH_STRENGTH = 1.5
 # 훨씬 가볍다 (전체 크기 596KB -> 이 크기면 수십 KB).
 PREVIEW_WIDTH = 800
 PREVIEW_JPEG_QUALITY = 80
+# 붓 자국의 상한. 막아두지 않으면 마우스를 오래 끄는 것만으로 끝없이 커진 요청이 올라온다.
+MAX_BRUSH_STROKES = 200
+MAX_BRUSH_POINTS = 2000
+
+
+def _parse_strokes(raw: str, field: str) -> tuple[list[BrushStroke], list[BrushStroke]] | None:
+    """붓으로 칠한 자국을 검증한다.
+
+    형식: {"before": [{"radius": 0.03, "points": [[x, y], ...]}, ...], "after": [...]}
+    좌표는 사진 크기 대비 0~1 비율, 반지름은 짧은 변 대비 비율이다."""
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        sides: list[list[BrushStroke]] = []
+        for side in ("before", "after"):
+            raw_strokes = data.get(side) or []
+            if len(raw_strokes) > MAX_BRUSH_STROKES:
+                raise ValueError(f"{side}: 칠한 자국이 너무 많습니다 ({len(raw_strokes)}개)")
+            strokes = []
+            for stroke in raw_strokes:
+                radius = float(stroke["radius"])
+                if not BRUSH_MIN_RADIUS_RATIO <= radius <= BRUSH_MAX_RADIUS_RATIO:
+                    raise ValueError(f"{side}: 붓 크기가 범위를 벗어났습니다 ({radius})")
+                points = [(float(x), float(y)) for x, y in stroke["points"]]
+                if not 1 <= len(points) <= MAX_BRUSH_POINTS:
+                    raise ValueError(f"{side}: 자국 하나의 점 개수가 잘못됐습니다 ({len(points)}개)")
+                if any(not (0.0 <= v <= 1.0) for point in points for v in point):
+                    raise ValueError(f"{side}: 칠한 자리가 사진 범위를 벗어났습니다")
+                strokes.append(BrushStroke(points=tuple(points), radius=radius))
+            sides.append(strokes)
+        return sides[0], sides[1]
+    except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"{field}가 올바르지 않습니다: {exc}") from exc
 
 
 def _parse_manual_points(raw: str) -> tuple[list, list] | None:
@@ -201,8 +243,20 @@ async def process(
     brightness_strength: float = Form(1.0),
     tone_strength: float = Form(1.0),
     preview: bool = Form(False),
+    source_strokes: str = Form(""),
+    result_strokes: str = Form(""),
 ) -> dict:
     manual_points = _parse_manual_points(points)
+    source = _parse_strokes(source_strokes, "원본에 칠한 자국")
+    result = _parse_strokes(result_strokes, "결과에 칠한 자국")
+    if source or result:
+        logger.info(
+            "strokes: 원본 %d/%d, 결과 %d/%d",
+            len(source[0]) if source else 0,
+            len(source[1]) if source else 0,
+            len(result[0]) if result else 0,
+            len(result[1]) if result else 0,
+        )
     for name, value in (("밝기", brightness_strength), ("색감", tone_strength)):
         if not 0.0 <= value <= MAX_MATCH_STRENGTH:
             raise HTTPException(
@@ -229,6 +283,8 @@ async def process(
             brightness_strength,
             tone_strength,
             PREVIEW_WIDTH if preview else 0,
+            source,
+            result,
         )
     except UnusableResult as exc:
         # 잘못된 입력이지 서버 오류가 아니다. 500 대신 이유를 돌려준다.
@@ -240,6 +296,36 @@ async def process(
         "after": _bgr_to_data_url(result_after, quality),
         "warnings": warnings,
     }
+
+
+@app.post("/api/mosaic", dependencies=[Depends(require_password)])
+async def mosaic(
+    before: UploadFile = File(...),
+    after: UploadFile | None = File(None),
+    face: bool = Form(True),
+    strokes: str = Form(""),
+) -> dict:
+    """정렬하지 않고 모자이크만 입힌다. 사진은 원래 크기·구도 그대로 돌려준다.
+
+    전/후를 맞출 필요 없이 가리기만 하면 되는 경우를 위한 길이다. 사진 한 장만 보내도 된다."""
+    painted = _parse_strokes(strokes, "칠한 자국")
+    before_strokes, after_strokes = painted if painted else ([], [])
+
+    warnings: list[str] = []
+    result: dict[str, str | None | list[str]] = {"before": None, "after": None}
+    for key, side, upload, side_strokes in (
+        ("before", "전", before, before_strokes),
+        ("after", "후", after, after_strokes),
+    ):
+        if upload is None:
+            continue
+        image = _upload_to_bgr(await upload.read(), side)
+        mosaicked, warning = await run_in_threadpool(mosaic_only, image, side_strokes, face)
+        if warning:
+            warnings.append(f"{side} 사진: {warning}")
+        result[key] = _bgr_to_data_url(mosaicked)
+    result["warnings"] = warnings
+    return result
 
 
 @app.post("/api/suggest-points", dependencies=[Depends(require_password)])

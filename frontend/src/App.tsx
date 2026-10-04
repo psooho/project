@@ -1,5 +1,7 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./App.css";
+import { BrushCanvas, EMPTY_STROKES, hasStrokes } from "./components/BrushCanvas";
+import type { StrokeSides } from "./components/BrushCanvas";
 import { clearStoredPassword, getStoredPassword } from "./components/PasswordGate";
 import { PhotoDropzone } from "./components/PhotoDropzone";
 import { AdjustSlider } from "./components/AdjustSlider";
@@ -109,6 +111,7 @@ async function processPair(
   brightnessStrength = 1,
   toneStrength = 1,
   preview = false,
+  strokes?: { source?: StrokeSides; result?: StrokeSides },
 ): Promise<Results> {
   const formData = new FormData();
   formData.append("before", before);
@@ -122,6 +125,10 @@ async function processPair(
   formData.append("tone_strength", String(toneStrength));
   // 끄는 도중에는 작게 줄인 결과를 받는다 (서버 계산 181ms -> 60ms, 전송량도 크게 줄어든다).
   formData.append("preview", String(preview));
+  // 원본에 칠한 자국은 정렬 전에 들어가 얼굴을 따라 움직이고, 결과에 칠한 자국은 마지막에
+  // 들어가 보고 칠한 자리에 그대로 남는다.
+  if (hasStrokes(strokes?.source)) formData.append("source_strokes", JSON.stringify(strokes!.source));
+  if (hasStrokes(strokes?.result)) formData.append("result_strokes", JSON.stringify(strokes!.result));
   if (manual) {
     formData.append(
       "points",
@@ -178,6 +185,35 @@ async function fetchSuggestedPoints(before: File, after: File) {
     labels: data.labels ?? [],
     level: data.level ?? false,
   };
+}
+
+/** 정렬 없이 모자이크만 입혀서 돌려받는다. 사진 한 장만 보내도 된다. */
+async function mosaicOnly(
+  before: File,
+  after: File | null,
+  face: boolean,
+  strokes: StrokeSides,
+): Promise<{ before: Blob; after: Blob | null; warnings: string[] }> {
+  const formData = new FormData();
+  formData.append("before", before);
+  if (after) formData.append("after", after);
+  formData.append("face", String(face));
+  formData.append("strokes", JSON.stringify(strokes));
+
+  const res = await postForm("/api/mosaic", formData);
+  if (!res.ok) {
+    const detail = await res
+      .json()
+      .then((body: { detail?: string }) => body.detail)
+      .catch(() => undefined);
+    throw new Error(detail || failureMessage(res.status));
+  }
+  const data: { before: string; after: string | null; warnings?: string[] } = await res.json();
+  const [beforeBlob, afterBlob] = await Promise.all([
+    fetch(data.before).then((r) => r.blob()),
+    data.after ? fetch(data.after).then((r) => r.blob()) : Promise.resolve(null),
+  ]);
+  return { before: beforeBlob, after: afterBlob, warnings: data.warnings ?? [] };
 }
 
 /** 어디를 기준으로 맞췄는지 사람이 읽을 수 있게. 결과를 검토하려면 알아야 한다. */
@@ -259,7 +295,42 @@ function App() {
   // 양쪽 눈썹이 다 잡힌 경우에만 수평을 맞출 수 있다 (백엔드가 판단해서 알려준다).
   const [suggestedLevel, setSuggestedLevel] = useState(false);
 
+  // 붓으로 칠한 자국. 원본에 칠한 것과 결과에 칠한 것은 들어가는 시점이 달라 따로 둔다.
+  const [sourceStrokes, setSourceStrokes] = useState<StrokeSides>(EMPTY_STROKES);
+  const [resultStrokes, setResultStrokes] = useState<StrokeSides>(EMPTY_STROKES);
+  // 지금 어느 사진 위에 칠하는 중인지. "source"는 원본, "result"는 변환 결과.
+  const [painting, setPainting] = useState<null | "source" | "result">(null);
+  // 칠하기를 취소했을 때 되돌릴 자국.
+  const [strokesBackup, setStrokesBackup] = useState<StrokeSides>(EMPTY_STROKES);
+  const [brushRadius, setBrushRadius] = useState(0.05);
+  const [maskFace, setMaskFace] = useState(true);
+  const [mosaicOnlyResult, setMosaicOnlyResult] = useState<{
+    before: { blob: Blob; url: string };
+    after: { blob: Blob; url: string } | null;
+  } | null>(null);
+  const [mosaicOnlyBusy, setMosaicOnlyBusy] = useState(false);
+
   const displayed = showingMosaic && mosaicResult ? mosaicResult : baseResult;
+
+  // 칠하기 화면에 띄울 원본 미리보기. 파일이 바뀔 때만 다시 만들고 쓰고 나면 해제한다.
+  const [sourceUrls, setSourceUrls] = useState<{ before: string | null; after: string | null }>({
+    before: null,
+    after: null,
+  });
+  useEffect(() => {
+    const before = beforePhoto ? URL.createObjectURL(beforePhoto) : null;
+    const after = afterPhoto ? URL.createObjectURL(afterPhoto) : null;
+    setSourceUrls({ before, after });
+    return () => {
+      if (before) URL.revokeObjectURL(before);
+      if (after) URL.revokeObjectURL(after);
+    };
+  }, [beforePhoto, afterPhoto]);
+
+  /** 변환 요청에 같이 보낼 붓 자국. */
+  function strokePayload() {
+    return { source: sourceStrokes, result: resultStrokes };
+  }
 
   /** 지금 쓰는 기준점이 자동으로 찾아준 것 그대로인지 (사용자가 손대면 false). */
   function isSuggested(points?: ManualPoints) {
@@ -298,6 +369,11 @@ function App() {
     setLastPoints(undefined);
     setSuggestedPoints(null);
     setSuggestedLevel(false);
+    // 칠한 자국은 그 사진 위의 좌표라, 사진이 바뀌면 더 이상 맞지 않는다.
+    setSourceStrokes(EMPTY_STROKES);
+    setResultStrokes(EMPTY_STROKES);
+    setPainting(null);
+    clearMosaicOnly();
     clearGif();
   }
 
@@ -357,7 +433,7 @@ function App() {
     try {
       const first = await processPair(
         beforePhoto, afterPhoto, false, manual, 1, isSuggested(manual),
-        adjust.brightness, adjust.tone,
+        adjust.brightness, adjust.tone, false, strokePayload(),
       );
 
       // 얼굴을 못 찾았으면 눈썹 위치를 자동으로 받아 한 번 더 맞춰본다. 사용자가 점을
@@ -373,7 +449,7 @@ function App() {
               points,
               result: await processPair(
                 beforePhoto, afterPhoto, false, points, 1, suggested.level,
-                adjust.brightness, adjust.tone,
+                adjust.brightness, adjust.tone, false, strokePayload(),
               ),
             };
             setSuggestedPoints(points);
@@ -442,7 +518,7 @@ function App() {
     try {
       const processed = await processPair(
         beforePhoto, afterPhoto, true, lastPoints, adjust.scale, isSuggested(lastPoints),
-        adjust.brightness, adjust.tone,
+        adjust.brightness, adjust.tone, false, strokePayload(),
       );
       setMosaicResult(toResultSet(processed));
       setShowingMosaic(true);
@@ -475,7 +551,7 @@ function App() {
         const processed = await processPair(
           beforePhoto, afterPhoto, false, lastPoints, current.values.scale,
           isSuggested(lastPoints), current.values.brightness, current.values.tone,
-          current.preview,
+          current.preview, strokePayload(),
         );
         // 직전 결과의 URL은 함수형 갱신으로 해제한다. 미리보기가 빠르게 이어지는 동안
         // 오래된 값을 붙잡고 있으면 URL이 새어나간다.
@@ -516,6 +592,95 @@ function App() {
     setAutoAligned(false);
     clearGif();
     setPicking(true);
+  }
+
+  /** 결과를 지금 값 그대로 다시 계산한다. 결과에 칠한 자국을 바꾼 뒤 반영할 때 쓴다. */
+  async function recomputeResult() {
+    if (!beforePhoto || !afterPhoto) return;
+    const useMosaic = showingMosaic;
+    setAdjustBusy(true);
+    setError(null);
+    try {
+      const processed = await processPair(
+        beforePhoto, afterPhoto, useMosaic, lastPoints, adjust.scale, isSuggested(lastPoints),
+        adjust.brightness, adjust.tone, false, strokePayload(),
+      );
+      const next = toResultSet(processed);
+      if (useMosaic) {
+        setMosaicResult((previous) => {
+          revokeResultSet(previous);
+          return next;
+        });
+      } else {
+        setBaseResult((previous) => {
+          revokeResultSet(previous);
+          return next;
+        });
+        // 모자이크본은 옛 자국으로 만든 것이라 더 이상 맞지 않는다.
+        setMosaicResult((previous) => {
+          revokeResultSet(previous);
+          return null;
+        });
+        setMosaicStatus("idle");
+      }
+      clearGif();
+    } catch (cause) {
+      setError(messageOf(cause, "모자이크 적용에 실패했습니다. 다시 시도해주세요."));
+    } finally {
+      setAdjustBusy(false);
+    }
+  }
+
+  /** 칠하기 화면으로 들어간다. 취소하면 들어오기 전 상태로 되돌린다. */
+  function startPainting(where: "source" | "result") {
+    setStrokesBackup(where === "source" ? sourceStrokes : resultStrokes);
+    setPainting(where);
+    setError(null);
+  }
+
+  function cancelPainting() {
+    if (painting === "source") setSourceStrokes(strokesBackup);
+    else if (painting === "result") setResultStrokes(strokesBackup);
+    setPainting(null);
+  }
+
+  /** 원본에 칠한 자국만 입혀서(정렬 없이) 결과를 받는다. */
+  async function handleMosaicOnly() {
+    if (!beforePhoto) return;
+    setMosaicOnlyBusy(true);
+    setError(null);
+    try {
+      const result = await mosaicOnly(beforePhoto, afterPhoto, maskFace, sourceStrokes);
+      clearMosaicOnly();
+      setMosaicOnlyResult({
+        before: { blob: result.before, url: URL.createObjectURL(result.before) },
+        after: result.after ? { blob: result.after, url: URL.createObjectURL(result.after) } : null,
+      });
+      if (result.warnings.length > 0) setError(result.warnings.join(" "));
+      setPainting(null);
+    } catch (cause) {
+      setError(messageOf(cause, "모자이크 처리에 실패했습니다. 다시 시도해주세요."));
+    } finally {
+      setMosaicOnlyBusy(false);
+    }
+  }
+
+  function clearMosaicOnly() {
+    setMosaicOnlyResult((previous) => {
+      if (previous) {
+        URL.revokeObjectURL(previous.before.url);
+        if (previous.after) URL.revokeObjectURL(previous.after.url);
+      }
+      return null;
+    });
+  }
+
+  function handleDownloadMosaicOnly() {
+    if (!mosaicOnlyResult || !beforePhoto) return;
+    downloadBlob(mosaicOnlyResult.before.blob, withJpgName(beforePhoto.name, "mosaic"));
+    if (mosaicOnlyResult.after && afterPhoto) {
+      downloadBlob(mosaicOnlyResult.after.blob, withJpgName(afterPhoto.name, "mosaic"));
+    }
   }
 
   function handleCancelMosaic() {
@@ -620,6 +785,167 @@ function App() {
             </p>
           )}
         </div>
+      )}
+
+      {painting && (
+        <section className="brush-section">
+          <h2 className="picker-title">
+            {painting === "source" ? "모자이크 칠하기 (원본)" : "모자이크 더 칠하기 (결과)"}
+          </h2>
+          <p className="picker-guide">
+            가리고 싶은 곳을 마우스로 끌어서 칠해주세요. 칠한 자리는 바로 흐려져 보이고,
+            최종 결과는 적용을 눌렀을 때 서버가 만듭니다.
+            {painting === "source"
+              ? " 원본에 칠한 자국은 변환할 때 얼굴을 따라 같이 움직입니다."
+              : " 결과에 칠한 자국은 보이는 그 자리에 그대로 남습니다."}
+          </p>
+          <div className="brush-controls">
+            <label className="brush-size">
+              붓 크기
+              <input
+                type="range"
+                min={1}
+                max={20}
+                step={1}
+                value={Math.round(brushRadius * 200)}
+                onChange={(event) => setBrushRadius(Number(event.target.value) / 200)}
+              />
+              <span>{Math.round(brushRadius * 200)}</span>
+            </label>
+            {painting === "source" && (
+              <label className="brush-face">
+                <input
+                  type="checkbox"
+                  checked={maskFace}
+                  onChange={(event) => setMaskFace(event.target.checked)}
+                />
+                얼굴(눈·코·입)도 자동으로 가리기
+              </label>
+            )}
+          </div>
+          <div className="picker-grid">
+            {painting === "source" ? (
+              <>
+                {sourceUrls.before && (
+                  <BrushCanvas
+                    label="전 (Before)"
+                    src={sourceUrls.before}
+                    radius={brushRadius}
+                    strokes={sourceStrokes.before}
+                    onChange={(update) =>
+                      setSourceStrokes((prev) => ({ ...prev, before: update(prev.before) }))
+                    }
+                  />
+                )}
+                {sourceUrls.after && (
+                  <BrushCanvas
+                    label="후 (After)"
+                    src={sourceUrls.after}
+                    radius={brushRadius}
+                    strokes={sourceStrokes.after}
+                    onChange={(update) =>
+                      setSourceStrokes((prev) => ({ ...prev, after: update(prev.after) }))
+                    }
+                  />
+                )}
+              </>
+            ) : (
+              displayed && (
+                <>
+                  <BrushCanvas
+                    label="전 (Before)"
+                    src={displayed.urls.before}
+                    radius={brushRadius}
+                    strokes={resultStrokes.before}
+                    onChange={(update) =>
+                      setResultStrokes((prev) => ({ ...prev, before: update(prev.before) }))
+                    }
+                  />
+                  <BrushCanvas
+                    label="후 (After)"
+                    src={displayed.urls.after}
+                    radius={brushRadius}
+                    strokes={resultStrokes.after}
+                    onChange={(update) =>
+                      setResultStrokes((prev) => ({ ...prev, after: update(prev.after) }))
+                    }
+                  />
+                </>
+              )
+            )}
+          </div>
+          <div className="actions">
+            {painting === "source" ? (
+              <>
+                <button
+                  type="button"
+                  className="submit-btn"
+                  disabled={mosaicOnlyBusy}
+                  onClick={handleMosaicOnly}
+                >
+                  {mosaicOnlyBusy ? "처리 중..." : "모자이크만 적용하기"}
+                </button>
+                <button
+                  type="button"
+                  className="submit-btn submit-btn--secondary"
+                  disabled={!beforePhoto || !afterPhoto || status === "processing"}
+                  onClick={() => {
+                    setPainting(null);
+                    clearMosaicOnly();
+                    handleTransform();
+                  }}
+                >
+                  이대로 사진 변환까지
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="submit-btn"
+                disabled={adjustBusy}
+                onClick={async () => {
+                  setPainting(null);
+                  await recomputeResult();
+                }}
+              >
+                {adjustBusy ? "적용 중..." : "결과에 적용"}
+              </button>
+            )}
+            <button type="button" className="submit-btn submit-btn--secondary" onClick={cancelPainting}>
+              취소
+            </button>
+          </div>
+        </section>
+      )}
+
+      {mosaicOnlyResult && !painting && (
+        <section className="mosaic-only">
+          <h2 className="picker-title">모자이크만 적용한 사진</h2>
+          <p className="picker-guide">
+            전/후를 맞추지 않고 가리기만 한 결과입니다. 사진 크기와 구도는 원본 그대로입니다.
+          </p>
+          <div className="picker-grid">
+            <img src={mosaicOnlyResult.before.url} alt="모자이크만 적용한 전 사진" className="picker-image" />
+            {mosaicOnlyResult.after && (
+              <img src={mosaicOnlyResult.after.url} alt="모자이크만 적용한 후 사진" className="picker-image" />
+            )}
+          </div>
+          <div className="actions">
+            <button type="button" className="submit-btn" onClick={handleDownloadMosaicOnly}>
+              다운로드
+            </button>
+            <button
+              type="button"
+              className="submit-btn submit-btn--secondary"
+              onClick={() => startPainting("source")}
+            >
+              더 칠하기
+            </button>
+            <button type="button" className="submit-btn submit-btn--secondary" onClick={clearMosaicOnly}>
+              닫기
+            </button>
+          </div>
+        </section>
       )}
 
       {picking && beforePhoto && afterPhoto && (
@@ -736,6 +1062,14 @@ function App() {
                 {mosaicStatus === "processing" ? "모자이크 처리 중..." : "모자이크"}
               </button>
             )}
+            <button
+              type="button"
+              className="submit-btn submit-btn--secondary"
+              disabled={adjustBusy}
+              onClick={() => startPainting("result")}
+            >
+              {hasStrokes(resultStrokes) ? "모자이크 다시 칠하기" : "모자이크 더 칠하기"}
+            </button>
             {gifResult ? (
               <button type="button" className="submit-btn submit-btn--secondary" onClick={handleDownloadGif}>
                 GIF 다운로드
@@ -752,9 +1086,21 @@ function App() {
             )}
           </>
         ) : (
-          <button type="button" className="submit-btn" disabled={!canTransform} onClick={() => handleTransform()}>
-            {suggesting ? "눈썹 위치를 찾는 중..." : status === "processing" ? "처리 중..." : "사진 변환"}
-          </button>
+          <>
+            <button type="button" className="submit-btn" disabled={!canTransform} onClick={() => handleTransform()}>
+              {suggesting ? "눈썹 위치를 찾는 중..." : status === "processing" ? "처리 중..." : "사진 변환"}
+            </button>
+            {beforePhoto && !painting && (
+              <button
+                type="button"
+                className="submit-btn submit-btn--secondary"
+                disabled={status === "processing"}
+                onClick={() => startPainting("source")}
+              >
+                모자이크만 하기
+              </button>
+            )}
+          </>
         )}
         {error && <span className="error-note">{error}</span>}
       </div>
