@@ -305,7 +305,10 @@ function App() {
   const [mosaicOnlyBusy, setMosaicOnlyBusy] = useState(false);
   // 칠하기 화면에 띄울 "자동 모자이크까지 들어간" 미리보기. 칠하기 전에 얼굴이 이미
   // 가려진 모습을 봐야, 어디를 더 칠해야 하는지 알 수 있다.
-  const [facePreview, setFacePreview] = useState<{ before: string; after: string | null } | null>(null);
+  const [facePreview, setFacePreview] = useState<{
+    before: { blob: Blob; url: string };
+    after: { blob: Blob; url: string } | null;
+  } | null>(null);
   const [facePreviewBusy, setFacePreviewBusy] = useState(false);
   const [facePreviewNotice, setFacePreviewNotice] = useState<string | null>(null);
 
@@ -633,8 +636,8 @@ function App() {
   function clearFacePreview() {
     setFacePreview((previous) => {
       if (previous) {
-        URL.revokeObjectURL(previous.before);
-        if (previous.after) URL.revokeObjectURL(previous.after);
+        URL.revokeObjectURL(previous.before.url);
+        if (previous.after) URL.revokeObjectURL(previous.after.url);
       }
       return null;
     });
@@ -656,8 +659,10 @@ function App() {
       const result = await mosaicOnly(beforePhoto, afterPhoto, true, EMPTY_STROKES);
       clearFacePreview();
       setFacePreview({
-        before: URL.createObjectURL(result.before),
-        after: result.after ? URL.createObjectURL(result.after) : null,
+        before: { blob: result.before, url: URL.createObjectURL(result.before) },
+        after: result.after
+          ? { blob: result.after, url: URL.createObjectURL(result.after) }
+          : null,
       });
       if (result.warnings.length > 0) setFacePreviewNotice(result.warnings.join(" "));
     } catch {
@@ -691,7 +696,11 @@ function App() {
     setMosaicOnlyBusy(true);
     setError(null);
     try {
-      const result = await mosaicOnly(beforePhoto, afterPhoto, maskFace, sourceStrokes);
+      // 들어올 때 만든 것이 곧 저장할 파일이다 — 더 칠한 게 없으면 다시 만들지 않는다.
+      const ready = facePreview && maskFace && !hasStrokes(sourceStrokes);
+      const result = ready
+        ? { before: facePreview.before.blob, after: facePreview.after?.blob ?? null, warnings: [] }
+        : await mosaicOnly(beforePhoto, afterPhoto, maskFace, sourceStrokes);
       downloadBlob(result.before, withJpgName(beforePhoto.name, "mosaic"));
       if (result.after && afterPhoto) {
         downloadBlob(result.after, withJpgName(afterPhoto.name, "mosaic"));
@@ -864,7 +873,7 @@ function App() {
                 {sourceUrls.before && (
                   <BrushCanvas
                     label="전 (Before)"
-                    src={facePreview?.before ?? sourceUrls.before}
+                    src={facePreview?.before.url ?? sourceUrls.before}
                     radius={brushRadius}
                     strokes={sourceStrokes.before}
                     onChange={(update) =>
@@ -875,7 +884,7 @@ function App() {
                 {sourceUrls.after && (
                   <BrushCanvas
                     label="후 (After)"
-                    src={facePreview?.after ?? sourceUrls.after}
+                    src={facePreview?.after?.url ?? sourceUrls.after}
                     radius={brushRadius}
                     strokes={sourceStrokes.after}
                     onChange={(update) =>

@@ -59,6 +59,11 @@ MOSAIC_SIDE_TRIM_RATIO = 0.12
 MOSAIC_FEATURE_DILATE_RATIO = 0.06
 # 윤곽을 당기면서 눈·코 마스크와 얼굴 마스크 사이에 생기는 틈을 메우는 정도(닫기 연산).
 MOSAIC_CLOSE_RATIO = 0.05
+# 모자이크를 계산할 때 쓰는 작업 크기. 블러 커널도 사진 크기에 비례해 커지기 때문에 비용이
+# 픽셀 수 x 커널 크기로 늘어난다 (실측: 1532x1149에서 0.8초, 3940x2955에서 22.4초).
+# 어차피 뭉갤 자리라 줄여서 흐리게 한 뒤 되돌려 키워도 눈에 띄는 차이가 없다.
+# 변환 결과(정면 1134x1008, 측면 1204x910)는 이 값보다 작아 예전 경로 그대로 간다.
+MOSAIC_WORK_SIDE = 1600
 # 붓 반지름의 허용 범위 (사진 짧은 변 대비). 너무 작으면 한 점도 안 찍히고, 너무 크면
 # 한 번에 사진 전체가 덮인다.
 BRUSH_MIN_RADIUS_RATIO = 0.004
@@ -691,11 +696,26 @@ def _blend_mosaic(image: np.ndarray, mosaic_mask: np.ndarray) -> np.ndarray:
     마스크 자체를 블러 처리해서 0~255 사이의 부드러운 경계(그라데이션)로 만든 뒤, 그 값을
     알파값 삼아 원본과 블러 이미지를 섞는다 — 마스크를 그대로 써서 딱 잘라 바꾸면 경계가
     뚜렷하게 티가 난다."""
-    feather_kernel = _odd_kernel_size(mosaic_mask.shape, MOSAIC_FEATHER_RATIO)
-    alpha = cv2.GaussianBlur(mosaic_mask, (feather_kernel, feather_kernel), 0).astype(np.float32) / 255.0
-    alpha = alpha[:, :, None]
+    height, width = image.shape[:2]
+    longest = max(height, width)
+    if longest > MOSAIC_WORK_SIDE:
+        ratio = MOSAIC_WORK_SIDE / longest
+        work = (max(1, round(width * ratio)), max(1, round(height * ratio)))
+        source = cv2.resize(image, work, interpolation=cv2.INTER_AREA)
+        mask = cv2.resize(mosaic_mask, work, interpolation=cv2.INTER_AREA)
+    else:
+        source, mask = image, mosaic_mask
 
-    blurred = _blur(image, MOSAIC_BLUR_KERNEL_RATIO)
+    feather_kernel = _odd_kernel_size(mask.shape, MOSAIC_FEATHER_RATIO)
+    alpha = cv2.GaussianBlur(mask, (feather_kernel, feather_kernel), 0)
+    blurred = _blur(source, MOSAIC_BLUR_KERNEL_RATIO)
+    if source is not image:
+        # 흐린 그림과 부드러운 경계는 둘 다 세부가 없는 값이라 되돌려 키워도 똑같아 보인다.
+        # 섞는 것만 원래 크기에서 하므로, 칠하지 않은 자리는 원본 그대로 남는다.
+        alpha = cv2.resize(alpha, (width, height), interpolation=cv2.INTER_LINEAR)
+        blurred = cv2.resize(blurred, (width, height), interpolation=cv2.INTER_LINEAR)
+
+    alpha = (alpha.astype(np.float32) / 255.0)[:, :, None]
     blended = image.astype(np.float32) * (1 - alpha) + blurred.astype(np.float32) * alpha
     return np.clip(blended, 0, 255).astype(np.uint8)
 
