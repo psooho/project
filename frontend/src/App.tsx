@@ -309,6 +309,14 @@ function App() {
     after: { blob: Blob; url: string } | null;
   } | null>(null);
   const [mosaicOnlyBusy, setMosaicOnlyBusy] = useState(false);
+  // 칠하기 화면에 띄울 "자동 모자이크까지 들어간" 미리보기. 칠하기 전에 얼굴이 이미
+  // 가려진 모습을 봐야, 어디를 더 칠해야 하는지 알 수 있다.
+  const [facePreview, setFacePreview] = useState<{ before: string; after: string | null } | null>(null);
+  const [facePreviewBusy, setFacePreviewBusy] = useState(false);
+  const [facePreviewNotice, setFacePreviewNotice] = useState<string | null>(null);
+  // 칠하기 화면에서 "얼굴도 자동으로 가리기"를 켠 채 변환까지 갔는지. 그랬다면 이후의
+  // 모든 재계산(밝기·색감·크기)에도 얼굴 모자이크를 계속 넣어야 결과가 유지된다.
+  const [bakedFaceMosaic, setBakedFaceMosaic] = useState(false);
 
   const displayed = showingMosaic && mosaicResult ? mosaicResult : baseResult;
 
@@ -373,7 +381,9 @@ function App() {
     setSourceStrokes(EMPTY_STROKES);
     setResultStrokes(EMPTY_STROKES);
     setPainting(null);
+    setBakedFaceMosaic(false);
     clearMosaicOnly();
+    clearFacePreview();
     clearGif();
   }
 
@@ -425,14 +435,15 @@ function App() {
     setError(null);
   }
 
-  async function handleTransform(manual?: ManualPoints) {
+  async function handleTransform(manual?: ManualPoints, withFaceMosaic = false) {
     if (!beforePhoto || !afterPhoto) return;
+    setBakedFaceMosaic(withFaceMosaic);
     setStatus("processing");
     setError(null);
     setSuggestFailed(false);
     try {
       const first = await processPair(
-        beforePhoto, afterPhoto, false, manual, 1, isSuggested(manual),
+        beforePhoto, afterPhoto, withFaceMosaic, manual, 1, isSuggested(manual),
         adjust.brightness, adjust.tone, false, strokePayload(),
       );
 
@@ -448,7 +459,7 @@ function App() {
             auto = {
               points,
               result: await processPair(
-                beforePhoto, afterPhoto, false, points, 1, suggested.level,
+                beforePhoto, afterPhoto, withFaceMosaic, points, 1, suggested.level,
                 adjust.brightness, adjust.tone, false, strokePayload(),
               ),
             };
@@ -549,7 +560,7 @@ function App() {
     try {
       for (;;) {
         const processed = await processPair(
-          beforePhoto, afterPhoto, false, lastPoints, current.values.scale,
+          beforePhoto, afterPhoto, bakedFaceMosaic, lastPoints, current.values.scale,
           isSuggested(lastPoints), current.values.brightness, current.values.tone,
           current.preview, strokePayload(),
         );
@@ -595,9 +606,9 @@ function App() {
   }
 
   /** 결과를 지금 값 그대로 다시 계산한다. 결과에 칠한 자국을 바꾼 뒤 반영할 때 쓴다. */
-  async function recomputeResult() {
+  async function recomputeResult(faceMosaic?: boolean) {
     if (!beforePhoto || !afterPhoto) return;
-    const useMosaic = showingMosaic;
+    const useMosaic = faceMosaic ?? (showingMosaic || bakedFaceMosaic);
     setAdjustBusy(true);
     setError(null);
     try {
@@ -606,7 +617,7 @@ function App() {
         adjust.brightness, adjust.tone, false, strokePayload(),
       );
       const next = toResultSet(processed);
-      if (useMosaic) {
+      if (showingMosaic) {
         setMosaicResult((previous) => {
           revokeResultSet(previous);
           return next;
@@ -631,17 +642,56 @@ function App() {
     }
   }
 
+  function clearFacePreview() {
+    setFacePreview((previous) => {
+      if (previous) {
+        URL.revokeObjectURL(previous.before);
+        if (previous.after) URL.revokeObjectURL(previous.after);
+      }
+      return null;
+    });
+    setFacePreviewNotice(null);
+  }
+
+  /** 얼굴 자동 모자이크만 넣은 미리보기를 받아온다. 끄면 원본을 그대로 쓴다.
+   *
+   *  실패해도 칠하기는 할 수 있어야 하므로 오류로 막지 않고 원본 위에 칠하게 둔다. */
+  async function refreshFacePreview(face: boolean) {
+    if (!beforePhoto) return;
+    if (!face) {
+      clearFacePreview();
+      return;
+    }
+    setFacePreviewBusy(true);
+    setFacePreviewNotice(null);
+    try {
+      const result = await mosaicOnly(beforePhoto, afterPhoto, true, EMPTY_STROKES);
+      clearFacePreview();
+      setFacePreview({
+        before: URL.createObjectURL(result.before),
+        after: result.after ? URL.createObjectURL(result.after) : null,
+      });
+      if (result.warnings.length > 0) setFacePreviewNotice(result.warnings.join(" "));
+    } catch {
+      setFacePreviewNotice("자동 모자이크를 넣지 못했습니다. 가릴 곳을 직접 칠해주세요.");
+    } finally {
+      setFacePreviewBusy(false);
+    }
+  }
+
   /** 칠하기 화면으로 들어간다. 취소하면 들어오기 전 상태로 되돌린다. */
   function startPainting(where: "source" | "result") {
     setStrokesBackup(where === "source" ? sourceStrokes : resultStrokes);
     setPainting(where);
     setError(null);
+    if (where === "source") void refreshFacePreview(maskFace);
   }
 
   function cancelPainting() {
     if (painting === "source") setSourceStrokes(strokesBackup);
     else if (painting === "result") setResultStrokes(strokesBackup);
     setPainting(null);
+    clearFacePreview();
   }
 
   /** 원본에 칠한 자국만 입혀서(정렬 없이) 결과를 받는다. */
@@ -817,19 +867,34 @@ function App() {
                 <input
                   type="checkbox"
                   checked={maskFace}
-                  onChange={(event) => setMaskFace(event.target.checked)}
+                  disabled={facePreviewBusy}
+                  onChange={(event) => {
+                    setMaskFace(event.target.checked);
+                    void refreshFacePreview(event.target.checked);
+                  }}
                 />
                 얼굴(눈·코·입)도 자동으로 가리기
               </label>
             )}
           </div>
+          {painting === "source" && facePreviewBusy && (
+            <p className="picker-notice">얼굴을 찾아 자동으로 가리는 중입니다...</p>
+          )}
+          {painting === "source" && !facePreviewBusy && facePreviewNotice && (
+            <p className="picker-notice">{facePreviewNotice}</p>
+          )}
+          {painting === "source" && !facePreviewBusy && !facePreviewNotice && facePreview && (
+            <p className="picker-notice picker-notice--ok">
+              얼굴은 자동으로 가려뒀습니다. <strong>더 가릴 곳만</strong> 칠해주세요.
+            </p>
+          )}
           <div className="picker-grid">
             {painting === "source" ? (
               <>
                 {sourceUrls.before && (
                   <BrushCanvas
                     label="전 (Before)"
-                    src={sourceUrls.before}
+                    src={facePreview?.before ?? sourceUrls.before}
                     radius={brushRadius}
                     strokes={sourceStrokes.before}
                     onChange={(update) =>
@@ -840,7 +905,7 @@ function App() {
                 {sourceUrls.after && (
                   <BrushCanvas
                     label="후 (After)"
-                    src={sourceUrls.after}
+                    src={facePreview?.after ?? sourceUrls.after}
                     radius={brushRadius}
                     strokes={sourceStrokes.after}
                     onChange={(update) =>
@@ -892,7 +957,8 @@ function App() {
                   onClick={() => {
                     setPainting(null);
                     clearMosaicOnly();
-                    handleTransform();
+                    clearFacePreview();
+                    handleTransform(undefined, maskFace);
                   }}
                 >
                   이대로 사진 변환까지
@@ -1048,7 +1114,19 @@ function App() {
                 변환 취소
               </button>
             )}
-            {usedManual ? null : showingMosaic ? (
+            {bakedFaceMosaic ? (
+              <button
+                type="button"
+                className="submit-btn submit-btn--secondary"
+                disabled={adjustBusy}
+                onClick={async () => {
+                  setBakedFaceMosaic(false);
+                  await recomputeResult(false);
+                }}
+              >
+                얼굴 모자이크 끄기
+              </button>
+            ) : usedManual ? null : showingMosaic ? (
               <button type="button" className="submit-btn submit-btn--secondary" onClick={handleCancelMosaic}>
                 모자이크 취소
               </button>
