@@ -14,7 +14,9 @@ logger = logging.getLogger("landmarks")
 MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "face_landmarker.task"
 
 _options = vision.FaceLandmarkerOptions(
-    base_options=BaseOptions(model_asset_path=str(MODEL_PATH)),
+    # 경로 대신 바이트로 넘긴다. MediaPipe의 네이티브 파일 열기는 Windows에서 비ASCII(한글 등)
+    # 경로를 못 연다.
+    base_options=BaseOptions(model_asset_buffer=MODEL_PATH.read_bytes()),
     running_mode=vision.RunningMode.IMAGE,
     num_faces=1,
 )
