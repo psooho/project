@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import { BrushCanvas, EMPTY_STROKES, hasStrokes } from "./components/BrushCanvas";
-import type { StrokeSides } from "./components/BrushCanvas";
+import type { BrushStroke, StrokeSides } from "./components/BrushCanvas";
 import { clearStoredPassword, getStoredPassword } from "./components/PasswordGate";
 import { PhotoDropzone } from "./components/PhotoDropzone";
 import { AdjustSlider } from "./components/AdjustSlider";
@@ -186,17 +186,17 @@ async function fetchSuggestedPoints(before: File, after: File) {
 }
 
 /** 정렬 없이 모자이크만 입혀서 돌려받는다. 사진 한 장만 보내도 된다. */
-async function mosaicOnly(
-  before: File,
-  after: File | null,
+/** 정렬 없이 모자이크만 입혀서 돌려받는다. 사진 한 장씩 부른다 — 두 장을 한 번에 보내면
+ *  둘 다 끝날 때까지 화면에 아무 변화가 없어서, 큰 사진에서는 멈춘 것처럼 보인다. */
+async function mosaicOne(
+  photo: File,
   face: boolean,
-  strokes: StrokeSides,
-): Promise<{ before: Blob; after: Blob | null; warnings: string[] }> {
+  strokes: BrushStroke[],
+): Promise<{ blob: Blob; warnings: string[] }> {
   const formData = new FormData();
-  formData.append("before", before);
-  if (after) formData.append("after", after);
+  formData.append("before", photo);
   formData.append("face", String(face));
-  formData.append("strokes", JSON.stringify(strokes));
+  formData.append("strokes", JSON.stringify({ before: strokes, after: [] }));
 
   const res = await postForm("/api/mosaic", formData);
   if (!res.ok) {
@@ -206,12 +206,9 @@ async function mosaicOnly(
       .catch(() => undefined);
     throw new Error(detail || failureMessage(res.status));
   }
-  const data: { before: string; after: string | null; warnings?: string[] } = await res.json();
-  const [beforeBlob, afterBlob] = await Promise.all([
-    fetch(data.before).then((r) => r.blob()),
-    data.after ? fetch(data.after).then((r) => r.blob()) : Promise.resolve(null),
-  ]);
-  return { before: beforeBlob, after: afterBlob, warnings: data.warnings ?? [] };
+  const data: { before: string; warnings?: string[] } = await res.json();
+  const blob = await fetch(data.before).then((r) => r.blob());
+  return { blob, warnings: data.warnings ?? [] };
 }
 
 /** 어디를 기준으로 맞췄는지 사람이 읽을 수 있게. 결과를 검토하려면 알아야 한다. */
@@ -305,12 +302,19 @@ function App() {
   const [mosaicOnlyBusy, setMosaicOnlyBusy] = useState(false);
   // 칠하기 화면에 띄울 "자동 모자이크까지 들어간" 미리보기. 칠하기 전에 얼굴이 이미
   // 가려진 모습을 봐야, 어디를 더 칠해야 하는지 알 수 있다.
-  const [facePreview, setFacePreview] = useState<{
-    before: { blob: Blob; url: string };
-    after: { blob: Blob; url: string } | null;
-  } | null>(null);
+  type MosaicImage = { blob: Blob; url: string } | null;
+  const [facePreview, setFacePreview] = useState<{ before: MosaicImage; after: MosaicImage }>({
+    before: null,
+    after: null,
+  });
   const [facePreviewBusy, setFacePreviewBusy] = useState(false);
   const [facePreviewNotice, setFacePreviewNotice] = useState<string | null>(null);
+  // 모자이크를 만드는 동안의 진행 상황. 사진 한 장이 한 단계다.
+  const [mosaicProgress, setMosaicProgress] = useState<{
+    done: number;
+    total: number;
+    label: string;
+  } | null>(null);
 
   const displayed = showingMosaic && mosaicResult ? mosaicResult : baseResult;
 
@@ -635,13 +639,39 @@ function App() {
 
   function clearFacePreview() {
     setFacePreview((previous) => {
-      if (previous) {
-        URL.revokeObjectURL(previous.before.url);
-        if (previous.after) URL.revokeObjectURL(previous.after.url);
-      }
-      return null;
+      if (previous.before) URL.revokeObjectURL(previous.before.url);
+      if (previous.after) URL.revokeObjectURL(previous.after.url);
+      return { before: null, after: null };
     });
     setFacePreviewNotice(null);
+    setMosaicProgress(null);
+  }
+
+  /** 사진을 한 장씩 모자이크하면서, 끝나는 대로 화면에 반영하고 진행 상황을 갱신한다.
+   *
+   *  큰 사진은 한 장에 2초 남짓 걸린다. 두 장을 한 번에 기다리게 하면 멈춘 것처럼 보여서,
+   *  먼저 끝난 사진이라도 바로 보여준다. */
+  async function buildMosaics(face: boolean, strokes: StrokeSides) {
+    const jobs: { side: "before" | "after"; label: string; photo: File; strokes: BrushStroke[] }[] = [];
+    if (beforePhoto) jobs.push({ side: "before", label: "전", photo: beforePhoto, strokes: strokes.before });
+    if (afterPhoto) jobs.push({ side: "after", label: "후", photo: afterPhoto, strokes: strokes.after });
+
+    const made: { before: Blob | null; after: Blob | null } = { before: null, after: null };
+    const notices: string[] = [];
+    for (const [index, job] of jobs.entries()) {
+      setMosaicProgress({ done: index, total: jobs.length, label: `${job.label} 사진` });
+      const { blob, warnings } = await mosaicOne(job.photo, face, job.strokes);
+      made[job.side] = blob;
+      notices.push(...warnings.map((w) => `${job.label} 사진: ${w}`));
+      const url = URL.createObjectURL(blob);
+      setFacePreview((previous) => {
+        const old = previous[job.side];
+        if (old) URL.revokeObjectURL(old.url);
+        return { ...previous, [job.side]: { blob, url } };
+      });
+    }
+    setMosaicProgress({ done: jobs.length, total: jobs.length, label: "" });
+    return { made, notices };
   }
 
   /** 얼굴 자동 모자이크만 넣은 미리보기를 받아온다. 끄면 원본을 그대로 쓴다.
@@ -656,19 +686,13 @@ function App() {
     setFacePreviewBusy(true);
     setFacePreviewNotice(null);
     try {
-      const result = await mosaicOnly(beforePhoto, afterPhoto, true, EMPTY_STROKES);
-      clearFacePreview();
-      setFacePreview({
-        before: { blob: result.before, url: URL.createObjectURL(result.before) },
-        after: result.after
-          ? { blob: result.after, url: URL.createObjectURL(result.after) }
-          : null,
-      });
-      if (result.warnings.length > 0) setFacePreviewNotice(result.warnings.join(" "));
+      const { notices } = await buildMosaics(true, EMPTY_STROKES);
+      if (notices.length > 0) setFacePreviewNotice(notices.join(" "));
     } catch {
       setFacePreviewNotice("자동 모자이크를 넣지 못했습니다. 가릴 곳을 직접 칠해주세요.");
     } finally {
       setFacePreviewBusy(false);
+      setMosaicProgress(null);
     }
   }
 
@@ -697,19 +721,19 @@ function App() {
     setError(null);
     try {
       // 들어올 때 만든 것이 곧 저장할 파일이다 — 더 칠한 게 없으면 다시 만들지 않는다.
-      const ready = facePreview && maskFace && !hasStrokes(sourceStrokes);
-      const result = ready
-        ? { before: facePreview.before.blob, after: facePreview.after?.blob ?? null, warnings: [] }
-        : await mosaicOnly(beforePhoto, afterPhoto, maskFace, sourceStrokes);
-      downloadBlob(result.before, withJpgName(beforePhoto.name, "mosaic"));
-      if (result.after && afterPhoto) {
-        downloadBlob(result.after, withJpgName(afterPhoto.name, "mosaic"));
+      const ready = facePreview.before && maskFace && !hasStrokes(sourceStrokes);
+      const files = ready
+        ? { before: facePreview.before!.blob, after: facePreview.after?.blob ?? null }
+        : (await buildMosaics(maskFace, sourceStrokes)).made;
+      if (files.before) downloadBlob(files.before, withJpgName(beforePhoto.name, "mosaic"));
+      if (files.after && afterPhoto) {
+        downloadBlob(files.after, withJpgName(afterPhoto.name, "mosaic"));
       }
-      if (result.warnings.length > 0) setError(result.warnings.join(" "));
     } catch (cause) {
       setError(messageOf(cause, "모자이크 저장에 실패했습니다. 다시 시도해주세요."));
     } finally {
       setMosaicOnlyBusy(false);
+      setMosaicProgress(null);
     }
   }
 
@@ -856,13 +880,27 @@ function App() {
               </label>
             )}
           </div>
-          {painting === "source" && facePreviewBusy && (
-            <p className="picker-notice">얼굴을 찾아 자동으로 가리는 중입니다...</p>
+          {mosaicProgress && (
+            <div className="progress" role="status" aria-live="polite">
+              <div className="progress-track">
+                <div
+                  className={`progress-fill${
+                    mosaicProgress.done < mosaicProgress.total ? " progress-fill--working" : ""
+                  }`}
+                  style={{ width: `${(mosaicProgress.done / mosaicProgress.total) * 100}%` }}
+                />
+              </div>
+              <span className="progress-text">
+                {mosaicProgress.done < mosaicProgress.total
+                  ? `${mosaicProgress.label}에서 얼굴을 찾아 가리는 중... (${mosaicProgress.done}/${mosaicProgress.total}장 완료)`
+                  : `${mosaicProgress.total}장 모두 완료`}
+              </span>
+            </div>
           )}
           {painting === "source" && !facePreviewBusy && facePreviewNotice && (
             <p className="picker-notice">{facePreviewNotice}</p>
           )}
-          {painting === "source" && !facePreviewBusy && !facePreviewNotice && facePreview && (
+          {painting === "source" && !facePreviewBusy && !facePreviewNotice && facePreview.before && (
             <p className="picker-notice picker-notice--ok">
               얼굴은 자동으로 가려뒀습니다. <strong>더 가릴 곳만</strong> 칠해주세요.
             </p>
@@ -873,7 +911,7 @@ function App() {
                 {sourceUrls.before && (
                   <BrushCanvas
                     label="전 (Before)"
-                    src={facePreview?.before.url ?? sourceUrls.before}
+                    src={facePreview.before?.url ?? sourceUrls.before}
                     radius={brushRadius}
                     strokes={sourceStrokes.before}
                     onChange={(update) =>
@@ -884,7 +922,7 @@ function App() {
                 {sourceUrls.after && (
                   <BrushCanvas
                     label="후 (After)"
-                    src={facePreview?.after?.url ?? sourceUrls.after}
+                    src={facePreview.after?.url ?? sourceUrls.after}
                     radius={brushRadius}
                     strokes={sourceStrokes.after}
                     onChange={(update) =>
