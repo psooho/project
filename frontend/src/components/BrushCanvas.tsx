@@ -10,13 +10,16 @@ export interface BrushStroke {
 
 export interface StrokeSides {
   before: BrushStroke[];
+  middle: BrushStroke[];
   after: BrushStroke[];
 }
 
-export const EMPTY_STROKES: StrokeSides = { before: [], after: [] };
+export const EMPTY_STROKES: StrokeSides = { before: [], middle: [], after: [] };
 
 export function hasStrokes(sides: StrokeSides | null | undefined) {
-  return Boolean(sides && (sides.before.length > 0 || sides.after.length > 0));
+  return Boolean(
+    sides && (sides.before.length > 0 || sides.middle.length > 0 || sides.after.length > 0),
+  );
 }
 
 interface BrushCanvasProps {

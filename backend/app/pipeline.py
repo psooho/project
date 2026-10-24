@@ -223,25 +223,22 @@ def _front_is_right(points: np.ndarray) -> bool | None:
     return None if asymmetry < SIDE_ASYMMETRY_THRESHOLD else front_is_right
 
 
-def _pair_facing(
-    before_points: np.ndarray, after_points: np.ndarray
-) -> tuple[bool | None, bool]:
-    """전/후 두 장을 함께 보고 정면/측면을 한 번만 정한다. (판정, 둘이 갈렸는지)
+def _set_facing(points_list: list[np.ndarray]) -> tuple[bool | None, bool]:
+    """전/중간/후 사진을 함께 보고 정면/측면을 한 번만 정한다. (판정, 서로 갈렸는지)
 
-    한 장만 보고 정하면 두 사진이 판정 기준을 사이에 두고 갈릴 때 나머지 한 장에 엉뚱한
-    틀이 씌워진다 — 측면인데 정면 틀을 쓰면 뒤통수 쪽이 좁아 귀가 잘린다. 그래서 두 장의
-    비대칭 정도를 평균 내어 한 번만 판정하고, 방향은 신호가 뚜렷한(비대칭이 큰) 쪽에서
-    가져온다."""
-    before_asymmetry, before_right = _facing_asymmetry(before_points)
-    after_asymmetry, after_right = _facing_asymmetry(after_points)
+    한 장만 보고 정하면 사진들이 판정 기준을 사이에 두고 갈릴 때 나머지에 엉뚱한 틀이
+    씌워진다 — 측면인데 정면 틀을 쓰면 뒤통수 쪽이 좁아 귀가 잘린다. 그래서 모든 사진의
+    비대칭 정도를 평균 내어 한 번만 판정하고, 방향은 신호가 가장 뚜렷한(비대칭이 큰)
+    사진에서 가져온다. 같은 값이면 앞 사진(전)을 따른다."""
+    measured = [_facing_asymmetry(points) for points in points_list]
+    asymmetries = [asymmetry for asymmetry, _ in measured]
 
-    averaged = (before_asymmetry + after_asymmetry) / 2
-    disagreed = (before_asymmetry >= SIDE_ASYMMETRY_THRESHOLD) != (
-        after_asymmetry >= SIDE_ASYMMETRY_THRESHOLD
-    )
+    averaged = sum(asymmetries) / len(asymmetries)
+    disagreed = len({asymmetry >= SIDE_ASYMMETRY_THRESHOLD for asymmetry in asymmetries}) > 1
     if averaged < SIDE_ASYMMETRY_THRESHOLD:
         return None, disagreed
-    return (before_right if before_asymmetry >= after_asymmetry else after_right), disagreed
+    strongest = asymmetries.index(max(asymmetries))
+    return measured[strongest][1], disagreed
 
 
 def _lift_front(transform: np.ndarray, points: np.ndarray | None) -> np.ndarray:
@@ -371,16 +368,16 @@ def _corners(shape: tuple[int, int]) -> np.ndarray:
 
 
 def _manual_transforms(
-    before_anchors: np.ndarray,
-    after_anchors: np.ndarray,
-    before_shape: tuple[int, int],
-    after_shape: tuple[int, int],
+    anchors_list: list[np.ndarray],
+    shapes: list[tuple[int, int]],
     level: bool = False,
-) -> tuple[np.ndarray, np.ndarray, float]:
-    """수동 기준점 모드에서 전/후 사진 각각의 변환을 구한다.
+) -> tuple[list[np.ndarray], list[float]]:
+    """수동 기준점 모드에서 사진 각각의 변환을 구한다. 첫 장(전)이 기준이다.
 
-    두 단계로 나눈다. (1) 후 사진을 전 사진에 맞추는 변환 — 여기서만 기준점을 쓰고,
-    점이 많을수록 정확해진다. (2) 화면 배치 — 두 사진이 다 들어오도록 확대해 캔버스
+    돌려주는 것: (사진별 변환, 둘째 장부터 각각 전 사진에 맞춘 뒤 남는 어긋남)
+
+    두 단계로 나눈다. (1) 나머지 사진을 전 사진에 맞추는 변환 — 여기서만 기준점을 쓰고,
+    점이 많을수록 정확해진다. (2) 화면 배치 — 모든 사진이 다 들어오도록 확대해 캔버스
     가운데 놓는다.
 
     level=True면 기준점들을 잇는 선(가장 왼쪽 점 → 가장 오른쪽 점)이 수평이 되게 돌린다.
@@ -392,8 +389,14 @@ def _manual_transforms(
     자동 모드처럼 기준점을 캔버스의 고정 좌표에 박지 않는 이유: 사용자가 어디를 찍을지
     알 수 없어서, 눈썹 양 끝처럼 멀리 떨어진 두 점을 고정 간격으로 줄이면 사진이 심하게
     축소돼 해상도가 뭉개진다."""
-    after_to_before = _fit_similarity(after_anchors, before_anchors)
-    residual = _fit_residual(after_anchors, before_anchors, after_to_before)
+    before_anchors = anchors_list[0]
+    to_before = [
+        _fit_similarity(anchors, before_anchors) for anchors in anchors_list[1:]
+    ]
+    residuals = [
+        _fit_residual(anchors, before_anchors, transform)
+        for anchors, transform in zip(anchors_list[1:], to_before)
+    ]
 
     rotation = np.eye(2)
     if level:
@@ -405,10 +408,10 @@ def _manual_transforms(
         rotation = np.array([[cos, -sin], [sin, cos]], dtype=np.float64)
         logger.info("manual: 눈썹선 %.1f도 -> 수평", np.degrees(angle))
 
-    # 두 사진의 네 귀퉁이를 모두 전 사진 좌표계로 모아 필요한 크기를 잰다.
+    # 모든 사진의 네 귀퉁이를 전 사진 좌표계로 모아 필요한 크기를 잰다.
     spread = np.vstack([
-        _corners(before_shape),
-        _apply_transform(_corners(after_shape), after_to_before),
+        _corners(shapes[0]),
+        *(_apply_transform(_corners(shape), transform) for shape, transform in zip(shapes[1:], to_before)),
     ]) @ rotation.T
     extent = spread.max(axis=0) - spread.min(axis=0)
     # 캔버스를 채우되 원본보다 키우지는 않는다. 캔버스는 정렬 작업판일 뿐이라 여기에 맞춰
@@ -423,7 +426,7 @@ def _manual_transforms(
     offset = np.array([CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2]) - center
     base = np.hstack([linear, offset.reshape(2, 1)]).astype(np.float32)
 
-    return base, _compose(base, after_to_before), residual
+    return [base, *(_compose(base, transform) for transform in to_before)], residuals
 
 
 def _scale_about(pivot: np.ndarray, factor: float) -> np.ndarray:
@@ -768,23 +771,30 @@ def _limit_input_size(image: np.ndarray) -> np.ndarray:
     return cv2.resize(image, size, interpolation=cv2.INTER_AREA)
 
 
-def process_pair(
-    before_bgr: np.ndarray,
-    after_bgr: np.ndarray,
+def _photo_names(count: int) -> list[str]:
+    """사용자에게 보일 사진 이름. 두 장이면 예전 그대로 전/후라 문구가 바뀌지 않는다."""
+    return ["전", "후"] if count == 2 else ["전", "중간", "후"]
+
+
+def process_photos(
+    images_bgr: list[np.ndarray],
     apply_mosaic: bool = False,
-    manual_points: tuple[ManualPoints, ManualPoints] | None = None,
-    scale_adjust: float = 1.0,
+    manual_points: list[ManualPoints] | None = None,
+    scale_adjusts: list[float] | None = None,
     level_points: bool = False,
     brightness_strength: float = 1.0,
     tone_strength: float = 1.0,
     preview_width: int = 0,
-    result_strokes: tuple[list[BrushStroke], list[BrushStroke]] | None = None,
-) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """전/후 사진을 같은 크기·각도·밝기로 맞춘다.
+    result_strokes: list[list[BrushStroke]] | None = None,
+) -> tuple[list[np.ndarray], list[str]]:
+    """전(·중간)·후 사진을 같은 크기·각도·밝기로 맞춘다. 첫 장(전)이 기준이다.
+
+    사진은 2장(전, 후) 또는 3장(전, 중간, 후)이다. 시간 순서대로 찍은 경과 사진을 한
+    틀에 넣어 비교하려는 것이라, 셋 다 같은 틀로 자르고 나머지를 전 사진에 맞춘다.
 
     manual_points를 주면 얼굴 검출을 건너뛰고 그 점들을 정렬 기준으로 쓴다. 이마·헤어라인
     클로즈업처럼 눈·코·입이 프레임 밖이라 얼굴 검출이 원리적으로 불가능한 사진용이다.
-    찍은 순서가 전/후의 대응 관계이므로 개수가 같아야 하고, 한쪽만 받지는 않는다.
+    찍은 순서가 사진끼리의 대응 관계이므로 개수가 모두 같아야 하고, 일부만 받지는 않는다.
 
     brightness_strength/tone_strength는 밝기·색감 보정의 세기다 (0이면 원본, 1이면 완전히
     맞춤).
@@ -796,49 +806,52 @@ def process_pair(
     level_points는 기준점들을 잇는 선을 수평으로 맞출지 여부다. 눈썹 위치를 자동으로 찾은
     경우처럼 그 점들이 무엇인지 알 때만 켠다.
 
-    result_strokes는 결과 사진 위에 붓으로 칠한 자국이다 ((전, 후) 순서). 크롭까지 끝난
+    result_strokes는 결과 사진 위에 붓으로 칠한 자국이다 (사진 순서대로). 크롭까지 끝난
     뒤에 입히므로, 보고 칠한 자리에 그대로 남는다.
 
-    scale_adjust는 후 사진만 그만큼 더 키우거나 줄인다. 두 사진의 고개 각도가 다르면
-    2D 변환으로는 어떤 기준점을 써도 한쪽이 틀어진다 — 눈썹을 맞추면 두상이 안 맞고
-    두상을 맞추면 눈썹이 안 맞는다(실측: 같은 두 장에서 가로 기준 1.12배, 세로 기준
-    0.89배). 자동으로 정할 수 없는 값이라 사람이 보고 미세조정할 수 있게 열어둔다."""
+    scale_adjusts는 둘째 장부터 각 사진을 전 사진 대비 그만큼 더 키우거나 줄인다. 두
+    사진의 고개 각도가 다르면 2D 변환으로는 어떤 기준점을 써도 한쪽이 틀어진다 — 눈썹을
+    맞추면 두상이 안 맞고 두상을 맞추면 눈썹이 안 맞는다(실측: 같은 두 장에서 가로 기준
+    1.12배, 세로 기준 0.89배). 자동으로 정할 수 없는 값이라 사람이 보고 미세조정할 수
+    있게 열어둔다."""
+    count = len(images_bgr)
+    if count not in (2, 3):
+        raise ValueError(f"사진은 2장 또는 3장이어야 합니다 (지금 {count}장)")
+    names = _photo_names(count)
+    scale_adjusts = list(scale_adjusts) if scale_adjusts is not None else [1.0] * (count - 1)
     warnings: list[str] = []
 
     # 얼굴 검출·정렬 전에 크기부터 잡는다. 수동 기준점은 0~1로 정규화된 값이라 여기서
     # 줄여도 가리키는 자리가 그대로다.
-    before_bgr = _limit_input_size(before_bgr)
-    after_bgr = _limit_input_size(after_bgr)
+    images_bgr = [_limit_input_size(image) for image in images_bgr]
+    shapes = [image.shape[:2] for image in images_bgr]
 
     if manual_points is not None:
-        before_manual, after_manual = manual_points
-        before_anchors = _manual_anchors(before_manual, before_bgr.shape[:2])
-        after_anchors = _manual_anchors(after_manual, after_bgr.shape[:2])
-        before_points = after_points = None
-        before_transform, after_transform, residual = _manual_transforms(
-            before_anchors, after_anchors, before_bgr.shape[:2], after_bgr.shape[:2], level_points
-        )
+        anchors = [_manual_anchors(points, shape) for points, shape in zip(manual_points, shapes)]
+        points_list: list[np.ndarray | None] = [None] * count
+        transforms, residuals = _manual_transforms(anchors, shapes, level_points)
         # 점이 3개 이상일 때만 의미가 있다 — 2개는 어떻게 찍든 오차가 0으로 떨어진다.
-        spread = float(np.linalg.norm(before_anchors.max(axis=0) - before_anchors.min(axis=0)))
-        if len(before_anchors) > 2 and spread > 0 and residual > spread * MANUAL_RESIDUAL_WARN_RATIO:
-            warnings.append(
-                "전/후 사진의 기준점이 서로 잘 맞지 않습니다. 같은 자리를 찍었는지 확인해주세요."
-            )
-        # 두 사진의 기준점이 벌어진 정도를 비교한다. 크게 다르면 서로 다른 자리를 찍은
-        # 것이고, 그대로 맞추면 한쪽이 극단적으로 작게 얹혀 결과가 못 쓰게 된다.
-        after_spread = float(np.linalg.norm(after_anchors.max(axis=0) - after_anchors.min(axis=0)))
-        if spread > 0 and after_spread > 0:
-            ratio = max(spread, after_spread) / min(spread, after_spread)
-            if ratio >= MANUAL_SPREAD_RATIO_WARN:
+        spread = float(np.linalg.norm(anchors[0].max(axis=0) - anchors[0].min(axis=0)))
+        for name, other, residual in zip(names[1:], anchors[1:], residuals):
+            if len(anchors[0]) > 2 and spread > 0 and residual > spread * MANUAL_RESIDUAL_WARN_RATIO:
                 warnings.append(
-                    f"전/후 기준점의 간격이 {ratio:.1f}배 차이납니다. 두 사진에서 서로 다른 "
-                    "자리를 찍었을 수 있습니다 — 확인 후 다시 찍어주세요."
+                    f"전/{name} 사진의 기준점이 서로 잘 맞지 않습니다. 같은 자리를 찍었는지 확인해주세요."
                 )
-            logger.info("manual: spread ratio %.2f (before=%.0f after=%.0f)", ratio, spread, after_spread)
-        logger.info("manual: %d points, residual=%.1fpx (spread=%.1fpx)", len(before_anchors), residual, spread)
+            # 두 사진의 기준점이 벌어진 정도를 비교한다. 크게 다르면 서로 다른 자리를 찍은
+            # 것이고, 그대로 맞추면 한쪽이 극단적으로 작게 얹혀 결과가 못 쓰게 된다.
+            other_spread = float(np.linalg.norm(other.max(axis=0) - other.min(axis=0)))
+            if spread > 0 and other_spread > 0:
+                ratio = max(spread, other_spread) / min(spread, other_spread)
+                if ratio >= MANUAL_SPREAD_RATIO_WARN:
+                    warnings.append(
+                        f"전/{name} 기준점의 간격이 {ratio:.1f}배 차이납니다. 두 사진에서 서로 다른 "
+                        "자리를 찍었을 수 있습니다 — 확인 후 다시 찍어주세요."
+                    )
+                logger.info("manual: %s spread ratio %.2f (before=%.0f other=%.0f)", name, ratio, spread, other_spread)
+            logger.info("manual: %s %d points, residual=%.1fpx (spread=%.1fpx)", name, len(other), residual, spread)
         # 미세조정은 정렬된 기준점 자리를 중심으로 한다 — 그래야 크기만 변하고 위치는 그대로다.
         alignment_pivot = _apply_transform(
-            before_anchors.mean(axis=0).reshape(1, 2), before_transform
+            anchors[0].mean(axis=0).reshape(1, 2), transforms[0]
         )[0].astype(np.float64)
         if apply_mosaic:
             warnings.append(
@@ -846,98 +859,97 @@ def process_pair(
             )
             apply_mosaic = False
     else:
-        before_points = detect_landmarks(cv2.cvtColor(before_bgr, cv2.COLOR_BGR2RGB))
-        after_points = detect_landmarks(cv2.cvtColor(after_bgr, cv2.COLOR_BGR2RGB))
+        anchors = None
+        points_list = [detect_landmarks(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)) for image in images_bgr]
 
-        if before_points is None:
-            warnings.append("전 사진에서 얼굴을 찾지 못해 원본을 그대로 반환합니다.")
-        if after_points is None:
-            warnings.append("후 사진에서 얼굴을 찾지 못해 원본을 그대로 반환합니다.")
-        if before_points is None or after_points is None:
-            return before_bgr, after_bgr, warnings
+        for name, points in zip(names, points_list):
+            if points is None:
+                warnings.append(f"{name} 사진에서 얼굴을 찾지 못해 원본을 그대로 반환합니다.")
+        if any(points is None for points in points_list):
+            return images_bgr, warnings
 
-        before_transform = _brow_transform(before_points)
-        after_transform = _brow_transform(after_points)
+        transforms = [_brow_transform(points) for points in points_list]
         alignment_pivot = np.array(CROP_ANCHOR, dtype=np.float64)
 
-    aligned_before, before_canonical_points, before_valid_mask, before_warning = _align_to_canonical(
-        before_bgr, before_transform, before_points
+    aligned_list: list[np.ndarray] = []
+    canonical_list: list[np.ndarray | None] = []
+    valid_masks: list[np.ndarray] = []
+    for name, image, transform, points in zip(names, images_bgr, transforms, points_list):
+        aligned, canonical, valid_mask, warning = _align_to_canonical(image, transform, points)
+        aligned_list.append(aligned)
+        canonical_list.append(canonical)
+        valid_masks.append(valid_mask)
+        if warning:
+            warnings.append(f"{name} 사진: {warning}")
+    alignment_points = (
+        [_apply_transform(a, t) for a, t in zip(anchors, transforms)] if anchors is not None else None
     )
-    aligned_after, after_canonical_points, after_valid_mask, after_warning = _align_to_canonical(
-        after_bgr, after_transform, after_points
-    )
-    before_alignment_points = (
-        _apply_transform(before_anchors, before_transform) if manual_points is not None else None
-    )
-    after_alignment_points = (
-        _apply_transform(after_anchors, after_transform) if manual_points is not None else None
-    )
-    if before_warning:
-        warnings.append(f"전 사진: {before_warning}")
-    if after_warning:
-        warnings.append(f"후 사진: {after_warning}")
 
     # 크롭이 반드시 품고 있어야 할 기준점. 자동 모드는 눈썹 중앙(캔버스에 고정)이다.
     #
-    # 수동 모드는 예전에 캔버스 중심을 썼는데, 이건 "두 사진을 합친 영역"의 중심이라
-    # 개별 사진이 그 점을 안 덮을 수 있다. 전/후 기준점 간격이 크게 다르면(오클릭으로
-    # 한쪽만 좁게 찍는 경우) 한 사진이 훨씬 작게 얹히면서 중심을 비껴가고, 그러면
+    # 수동 모드는 예전에 캔버스 중심을 썼는데, 이건 "사진들을 합친 영역"의 중심이라
+    # 개별 사진이 그 점을 안 덮을 수 있다. 기준점 간격이 크게 다르면(오클릭으로 한쪽만
+    # 좁게 찍는 경우) 한 사진이 훨씬 작게 얹히면서 중심을 비껴가고, 그러면
     # _max_valid_margins가 한 점으로 무너져 빈 이미지가 만들어지고 변환이 통째로 죽었다.
-    # 찍은 기준점들의 평균은 정의상 두 사진 안에 있으므로 그 문제가 없다.
-    if manual_points is None:
+    # 찍은 기준점들의 평균은 정의상 모든 사진 안에 있으므로 그 문제가 없다.
+    if alignment_points is None:
         crop_anchor = CROP_ANCHOR
     else:
-        anchor_centroid = np.vstack([before_alignment_points, after_alignment_points]).mean(axis=0)
+        anchor_centroid = np.vstack(alignment_points).mean(axis=0)
         crop_anchor = (float(anchor_centroid[0]), float(anchor_centroid[1]))
+
+    def intersect(boxes: list[tuple[int, int, int, int]]) -> tuple[int, int, int, int]:
+        return (
+            max(box[0] for box in boxes),
+            max(box[1] for box in boxes),
+            min(box[2] for box in boxes),
+            min(box[3] for box in boxes),
+        )
 
     # 여백이 사진마다 같도록 정해진 틀로 자른다. 자동 모드는 얼굴 윤곽으로 정면/측면을
     # 가릴 수 있어 각각의 틀을 쓴다. 기준점만 있는 모드는 그 판정을 할 수 없으므로
     # 예전처럼 "흰 여백이 없는 최대 사각형"으로 남겨둔다.
     if manual_points is None:
-        facing, facing_disagreed = _pair_facing(
-            before_canonical_points, after_canonical_points
-        )
+        facing, facing_disagreed = _set_facing(canonical_list)
         if facing_disagreed:
             warnings.append(
-                "전/후 사진의 고개 각도가 서로 달라 정면·측면 판정이 갈렸습니다. "
+                f"{'/'.join(names)} 사진의 고개 각도가 서로 달라 정면·측면 판정이 갈렸습니다. "
                 "결과의 여백을 확인해주세요."
             )
         final_box = _fixed_frame_box(facing)
-        before_box = after_box = final_box
+        boxes = [final_box] * count
         logger.info("frame: %s 고정 틀 %s", "정면" if facing is None else "측면", final_box)
     else:
-        before_box = _max_valid_margins(before_valid_mask, crop_anchor)
-        after_box = _max_valid_margins(after_valid_mask, crop_anchor)
-        final_box = (
-            max(before_box[0], after_box[0]),
-            max(before_box[1], after_box[1]),
-            min(before_box[2], after_box[2]),
-            min(before_box[3], after_box[3]),
-        )
-        # 결과는 두 크롭의 교집합이다. 전/후에 서로 다른 자리를 찍으면 두 사진이 어긋나게
-        # 얹히면서 교집합만 얇아지는데, 크기 하한(MIN_RESULT_SIZE_PX)은 넘기기 때문에
-        # 실낱 같은 띠가 아무 말 없이 나갔다 (실측: 470x138). 간격 경고로도 안 잡힌다 —
-        # 간격은 같고 위치만 다를 수 있어서다. 그래서 겹치는 넓이를 따로 본다.
-        smaller_area = min(_box_area(before_box), _box_area(after_box))
+        boxes = [_max_valid_margins(mask, crop_anchor) for mask in valid_masks]
+        final_box = intersect(boxes)
+        # 결과는 크롭들의 교집합이다. 서로 다른 자리를 찍으면 사진들이 어긋나게 얹히면서
+        # 교집합만 얇아지는데, 크기 하한(MIN_RESULT_SIZE_PX)은 넘기기 때문에 실낱 같은
+        # 띠가 아무 말 없이 나갔다 (실측: 470x138). 간격 경고로도 안 잡힌다 — 간격은 같고
+        # 위치만 다를 수 있어서다. 그래서 겹치는 넓이를 따로 본다.
+        smaller_area = min(_box_area(box) for box in boxes)
         if smaller_area > 0:
             overlap_ratio = _box_area(final_box) / smaller_area
             if overlap_ratio < MANUAL_OVERLAP_WARN_RATIO:
-                logger.info("manual: 전/후 겹침 %.2f", overlap_ratio)
+                logger.info("manual: 겹침 %.2f", overlap_ratio)
                 warnings.append(
-                    "전/후 사진에서 찍은 기준점이 서로 다른 자리로 보입니다. 두 사진이 "
+                    f"{'/'.join(names)} 사진에서 찍은 기준점이 서로 다른 자리로 보입니다. "
+                    f"{'두 사진이' if count == 2 else '사진들이'} "
                     f"{round(overlap_ratio * 100)}%만 겹쳐서 결과가 많이 잘렸습니다. "
                     "같은 부위를 찍었는지 확인해주세요."
                 )
-    if abs(scale_adjust - 1.0) > 1e-6:
-        # 배율은 두 사진의 "상대" 크기다. 그래서 후 사진을 줄이는 대신 전 사진을 그만큼
-        # 키워도 결과는 같은데, 축소는 부작용이 두 가지 있다 — 사진이 캔버스를 덜 덮어
-        # 크롭 하단이 올라오고, 남은 내용도 기준점 쪽으로 끌려 내려온다. 둘이 겹쳐서
-        # 눈썹이 잘렸다(실측: 80%에서 여유 17px, 70%에서 2.8px). 그래서 어느 쪽이든
-        # "키우는" 방향으로만 적용한다.
-        #
+    # 배율은 전 사진 대비 "상대" 크기다. 그래서 어떤 사진을 줄이는 대신 나머지를 그만큼
+    # 키워도 결과는 같은데, 축소는 부작용이 두 가지 있다 — 사진이 캔버스를 덜 덮어
+    # 크롭 하단이 올라오고, 남은 내용도 기준점 쪽으로 끌려 내려온다. 둘이 겹쳐서
+    # 눈썹이 잘렸다(실측: 80%에서 여유 17px, 70%에서 2.8px). 그래서 "키우는" 방향으로만
+    # 적용한다 — 가장 작은 배율이 1이 되도록 모든 사진에 같은 비율을 곱한다. 두 장일 때는
+    # 예전과 똑같이 후 사진을 키우거나(배율>1) 전 사진을 키운다(배율<1).
+    relative = [1.0, *scale_adjusts]
+    smallest = min(relative)
+    factors = [value / smallest for value in relative]
+    if any(abs(value - 1.0) > 1e-6 for value in scale_adjusts):
         # 어디를 고정하고 키울지는 모드에 따라 다르다.
         if manual_points is None:
-            # 자동 모드: 눈썹을 고정한다. 전/후 눈썹이 계속 같은 자리에 있어야 비교가
+            # 자동 모드: 눈썹을 고정한다. 사진들의 눈썹이 계속 같은 자리에 있어야 비교가
             # 성립하는데, 눈썹에서 떨어진 점을 기준으로 키우면 그만큼 한쪽만 밀린다.
             # 크롭이 고정 틀이고 눈썹은 그 안쪽(아래 가장자리에서 정면 231px, 측면 343px
             # 위)에 있어서, 눈썹을 기준으로 키워도 프레임 밖으로 밀려날 일이 없다.
@@ -954,53 +966,37 @@ def process_pair(
             #
             # 앞쪽이 어느 쪽인지는 기준점 위치로 정한다 — 눈썹은 머리 앞쪽에 있으므로,
             # 기준점이 더 가까이 붙어 있는 가장자리가 얼굴 앞이다.
-            anchors_x = np.concatenate(
-                [before_alignment_points[:, 0], after_alignment_points[:, 0]]
-            )
+            anchors_x = np.concatenate([points[:, 0] for points in alignment_points])
             to_left = float(anchors_x.min()) - final_box[0]
             to_right = final_box[2] - float(anchors_x.max())
             pivot_x = float(final_box[0] if to_left <= to_right else final_box[2])
             pivot = np.array([pivot_x, float(final_box[3])], dtype=np.float64)
-        if scale_adjust > 1.0:
-            after_transform = _compose(_scale_about(pivot, scale_adjust), after_transform)
-            aligned_after, after_canonical_points, after_valid_mask, after_warning = _align_to_canonical(
-                after_bgr, after_transform, after_points
+        for index, factor in enumerate(factors):
+            if abs(factor - 1.0) <= 1e-6:
+                continue
+            transforms[index] = _compose(_scale_about(pivot, factor), transforms[index])
+            aligned_list[index], canonical_list[index], valid_masks[index], _ = _align_to_canonical(
+                images_bgr[index], transforms[index], points_list[index]
             )
-            after_box = _max_valid_margins(after_valid_mask, crop_anchor)
-        else:
-            before_transform = _compose(_scale_about(pivot, 1.0 / scale_adjust), before_transform)
-            aligned_before, before_canonical_points, before_valid_mask, before_warning = _align_to_canonical(
-                before_bgr, before_transform, before_points
-            )
-            before_box = _max_valid_margins(before_valid_mask, crop_anchor)
+            boxes[index] = _max_valid_margins(valid_masks[index], crop_anchor)
 
         # 기준점은 수동/자동제안 모드에만 있다. 자동(얼굴 검출) 모드에서는 없으므로
         # 건드리지 않는다 — 예전에 조건 없이 참조해서 크기 조절이 500 에러로 죽었다.
-        if manual_points is not None:
-            before_alignment_points = _apply_transform(before_anchors, before_transform)
-            after_alignment_points = _apply_transform(after_anchors, after_transform)
+        if anchors is not None:
+            alignment_points = [_apply_transform(a, t) for a, t in zip(anchors, transforms)]
 
         # 자동 모드는 틀이 고정이라 배율을 바꿔도 크롭을 다시 잡지 않는다. 다시 잡으면
         # 사진마다 여백이 달라져서 고정 틀을 쓰는 의미가 없어진다.
         if manual_points is not None:
-            final_box = (
-                max(before_box[0], after_box[0]),
-                max(before_box[1], after_box[1]),
-                min(before_box[2], after_box[2]),
-                min(before_box[3], after_box[3]),
-            )
-        logger.info(
-            "scale adjust: x%.3f applied to %s (pivot y=%.0f)",
-            scale_adjust, "after" if scale_adjust > 1 else "before", pivot[1],
-        )
+            final_box = intersect(boxes)
+        logger.info("scale adjust: factors %s (pivot y=%.0f)", [round(f, 3) for f in factors], pivot[1])
 
     # 기준점(눈썹) 아래 여백을 확보한다. 크롭은 원래 "흰 여백이 전혀 없는 최대 사각형"인데,
     # 사진이 눈썹 바로 아래에서 끝나면 그 규칙만으로는 눈썹이 경계에 걸린다. 필요한 만큼만
     # 아래로 넓히고, 모자란 부분은 가장자리를 늘여 채운다.
-    anchor_sets = [p for p in (before_alignment_points, after_alignment_points) if p is not None]
-    if anchor_sets:
-        lowest = max(float(p[:, 1].max()) for p in anchor_sets)
-        spread = max(float(np.linalg.norm(p[1] - p[0])) for p in anchor_sets)
+    if alignment_points:
+        lowest = max(float(p[:, 1].max()) for p in alignment_points)
+        spread = max(float(np.linalg.norm(p[1] - p[0])) for p in alignment_points)
         needed = lowest + spread * ANCHOR_BOTTOM_MARGIN_RATIO
         limit = final_box[3] + (final_box[3] - final_box[1]) * ANCHOR_BOTTOM_MAX_STRETCH
         if needed > final_box[3]:
@@ -1017,7 +1013,7 @@ def process_pair(
     if manual_points is None:
         left, top, right, bottom = final_box
         area = max(1, (right - left) * (bottom - top))
-        for name, mask in (("전", before_valid_mask), ("후", after_valid_mask)):
+        for name, mask in zip(names, valid_masks):
             window = mask[top:bottom, left:right]
             filled = 1.0 - float((window > 0).sum()) / area
             if filled > FRAME_FILL_WARN_RATIO:
@@ -1027,59 +1023,90 @@ def process_pair(
                 )
             logger.info("frame: %s 사진 덮는 비율 %.1f%%", name, 100 * (1 - filled))
 
-    logger.info("crop: before=%s after=%s -> using=%s (canvas=%dx%d)", before_box, after_box, final_box, CANVAS_WIDTH, CANVAS_HEIGHT)
+    logger.info("crop: %s -> using=%s (canvas=%dx%d)", boxes, final_box, CANVAS_WIDTH, CANVAS_HEIGHT)
     if (
         final_box[2] - final_box[0] < MIN_RESULT_SIZE_PX
         or final_box[3] - final_box[1] < MIN_RESULT_SIZE_PX
     ):
         raise UnusableResult(
-            "전/후 사진에서 찍은 기준점이 서로 맞지 않아 겹치는 부분이 거의 없습니다. "
+            f"{'/'.join(names)} 사진에서 찍은 기준점이 서로 맞지 않아 겹치는 부분이 거의 없습니다. "
+            "사진들에서 같은 자리를 찍었는지 확인해주세요."
+            if count > 2
+            else "전/후 사진에서 찍은 기준점이 서로 맞지 않아 겹치는 부분이 거의 없습니다. "
             "두 사진에서 같은 자리를 찍었는지 확인해주세요."
         )
-    aligned_before, before_canonical_points = _crop_to_box(aligned_before, before_canonical_points, final_box)
-    aligned_after, after_canonical_points = _crop_to_box(aligned_after, after_canonical_points, final_box)
+    for index in range(count):
+        aligned_list[index], canonical_list[index] = _crop_to_box(
+            aligned_list[index], canonical_list[index], final_box
+        )
 
     # 미리보기는 여기서 줄인다. 정렬·크롭까지 끝난 뒤라 결과 구도는 원본과 같고, 뒤따르는
     # 색 보정만 작은 이미지에서 돌아간다.
-    if preview_width and aligned_before.shape[1] > preview_width:
-        ratio = preview_width / aligned_before.shape[1]
-        size = (preview_width, max(1, round(aligned_before.shape[0] * ratio)))
-        aligned_before = cv2.resize(aligned_before, size, interpolation=cv2.INTER_AREA)
-        aligned_after = cv2.resize(aligned_after, size, interpolation=cv2.INTER_AREA)
-        if before_canonical_points is not None:
-            before_canonical_points = before_canonical_points * ratio
-        if after_canonical_points is not None:
-            after_canonical_points = after_canonical_points * ratio
+    if preview_width and aligned_list[0].shape[1] > preview_width:
+        ratio = preview_width / aligned_list[0].shape[1]
+        size = (preview_width, max(1, round(aligned_list[0].shape[0] * ratio)))
+        for index in range(count):
+            aligned_list[index] = cv2.resize(aligned_list[index], size, interpolation=cv2.INTER_AREA)
+            if canonical_list[index] is not None:
+                canonical_list[index] = canonical_list[index] * ratio
 
     if manual_points is None:
-        before_color_mask = _face_oval_mask(aligned_before.shape[:2], before_canonical_points)
-        after_color_mask = _face_oval_mask(aligned_after.shape[:2], after_canonical_points)
+        color_masks = [
+            _face_oval_mask(aligned.shape[:2], canonical)
+            for aligned, canonical in zip(aligned_list, canonical_list)
+        ]
     else:
-        before_color_mask = _skin_mask(aligned_before)
-        after_color_mask = _skin_mask(aligned_after)
-    matched_after = _match_color(
-        aligned_before,
-        before_color_mask,
-        aligned_after,
-        after_color_mask,
-        match_contrast=manual_points is None,
-        brightness_strength=brightness_strength,
-        tone_strength=tone_strength,
-    )
+        color_masks = [_skin_mask(aligned) for aligned in aligned_list]
+    # 밝기·색감은 모두 전 사진에 맞춘다. 중간 사진끼리 맞추면 오차가 이어져 쌓인다.
+    results = [aligned_list[0]] + [
+        _match_color(
+            aligned_list[0],
+            color_masks[0],
+            aligned,
+            mask,
+            match_contrast=manual_points is None,
+            brightness_strength=brightness_strength,
+            tone_strength=tone_strength,
+        )
+        for aligned, mask in zip(aligned_list[1:], color_masks[1:])
+    ]
 
     # 얼굴 모자이크와 결과에 칠한 자국은 마스크를 합쳐 한 번에 입힌다. 따로 입히면 겹치는
     # 자리가 두 번 흐려져 그 부분만 더 진해 보인다.
-    before_mask = np.zeros(aligned_before.shape[:2], dtype=np.uint8)
-    after_mask = np.zeros(matched_after.shape[:2], dtype=np.uint8)
-    if apply_mosaic:
-        before_mask = _build_mosaic_mask(aligned_before.shape[:2], before_canonical_points)
-        after_mask = _build_mosaic_mask(matched_after.shape[:2], after_canonical_points)
-    if result_strokes is not None:
-        before_mask = np.maximum(before_mask, _brush_mask(before_mask.shape, result_strokes[0]))
-        after_mask = np.maximum(after_mask, _brush_mask(after_mask.shape, result_strokes[1]))
-    if before_mask.any():
-        aligned_before = _blend_mosaic(aligned_before, before_mask)
-    if after_mask.any():
-        matched_after = _blend_mosaic(matched_after, after_mask)
+    for index in range(count):
+        mask = np.zeros(results[index].shape[:2], dtype=np.uint8)
+        if apply_mosaic:
+            mask = _build_mosaic_mask(results[index].shape[:2], canonical_list[index])
+        if result_strokes is not None:
+            mask = np.maximum(mask, _brush_mask(mask.shape, result_strokes[index]))
+        if mask.any():
+            results[index] = _blend_mosaic(results[index], mask)
 
-    return aligned_before, matched_after, warnings
+    return results, warnings
+
+
+def process_pair(
+    before_bgr: np.ndarray,
+    after_bgr: np.ndarray,
+    apply_mosaic: bool = False,
+    manual_points: tuple[ManualPoints, ManualPoints] | None = None,
+    scale_adjust: float = 1.0,
+    level_points: bool = False,
+    brightness_strength: float = 1.0,
+    tone_strength: float = 1.0,
+    preview_width: int = 0,
+    result_strokes: tuple[list[BrushStroke], list[BrushStroke]] | None = None,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """전/후 두 장만 맞추는 예전 호출 방식. 자세한 내용은 process_photos 참고."""
+    (before, after), warnings = process_photos(
+        [before_bgr, after_bgr],
+        apply_mosaic,
+        list(manual_points) if manual_points is not None else None,
+        [scale_adjust],
+        level_points,
+        brightness_strength,
+        tone_strength,
+        preview_width,
+        list(result_strokes) if result_strokes is not None else None,
+    )
+    return before, after, warnings

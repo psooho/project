@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import { BrushCanvas, EMPTY_STROKES, hasStrokes } from "./components/BrushCanvas";
 import type { BrushStroke, StrokeSides } from "./components/BrushCanvas";
@@ -13,13 +13,22 @@ type MosaicStatus = "idle" | "processing" | "done";
 
 interface Results {
   before: Blob;
+  /** 중간 사진을 넣었을 때만 있다. */
+  middle: Blob | null;
   after: Blob;
   warnings: string[];
 }
 
 interface ResultSet {
   results: Results;
-  urls: { before: string; after: string };
+  urls: { before: string; middle: string | null; after: string };
+}
+
+/** 변환에 보낼 사진. 중간은 경과 사진을 세 장으로 비교할 때만 넣는다. */
+interface Photos {
+  before: File;
+  middle: File | null;
+  after: File;
 }
 
 function toResultSet(results: Results): ResultSet {
@@ -27,6 +36,7 @@ function toResultSet(results: Results): ResultSet {
     results,
     urls: {
       before: URL.createObjectURL(results.before),
+      middle: results.middle ? URL.createObjectURL(results.middle) : null,
       after: URL.createObjectURL(results.after),
     },
   };
@@ -35,6 +45,7 @@ function toResultSet(results: Results): ResultSet {
 function revokeResultSet(set: ResultSet | null) {
   if (!set) return;
   URL.revokeObjectURL(set.urls.before);
+  if (set.urls.middle) URL.revokeObjectURL(set.urls.middle);
   URL.revokeObjectURL(set.urls.after);
 }
 
@@ -45,8 +56,11 @@ function revokeResultSet(set: ResultSet | null) {
 const API_BASE_URL = "";
 
 // 실제 정렬(각도·크기)/밝기·색감 보정/헤어라인·눈썹만 남기는 모자이크 처리는
-// 백엔드 파이프라인(backend/app/main.py의 process_pair, PRD 6.2~6.5)에서 이뤄진다.
-type ManualPoints = { before: NormalizedPoint[]; after: NormalizedPoint[] };
+// 백엔드 파이프라인(backend/app/pipeline.py의 process_photos, PRD 6.2~6.5)에서 이뤄진다.
+type Side = "before" | "middle" | "after";
+
+// 중간 사진이 없으면 middle은 빈 목록이다.
+type ManualPoints = { before: NormalizedPoint[]; middle: NormalizedPoint[]; after: NormalizedPoint[] };
 
 /** 서버가 이유를 알려줬으면 그걸 쓰고, 아니면 준비된 문구를 쓴다. */
 /** 서버에 폼을 보낸다. 응답을 못 받은 경우와 암호가 바뀐 경우를 여기서 한 번에 처리한다.
@@ -101,12 +115,14 @@ const MATCH_STEP = 0.1;
 const MATCH_MIN = 0;
 const MATCH_MAX = 1.5;
 
+/** 조절값의 처음 상태. scale은 후 사진, middleScale은 중간 사진의 크기다 (둘 다 전 사진 대비). */
+const INITIAL_ADJUST = { brightness: 1, tone: 1, scale: 1, middleScale: 1 };
+
 async function processPair(
-  before: File,
-  after: File,
+  photos: Photos,
   mosaic: boolean,
   manual?: ManualPoints,
-  scaleAdjust = 1,
+  scale: { after: number; middle: number } = { after: 1, middle: 1 },
   level = false,
   brightnessStrength = 1,
   toneStrength = 1,
@@ -114,10 +130,14 @@ async function processPair(
   strokes?: StrokeSides,
 ): Promise<Results> {
   const formData = new FormData();
-  formData.append("before", before);
-  formData.append("after", after);
+  formData.append("before", photos.before);
+  formData.append("after", photos.after);
+  if (photos.middle) {
+    formData.append("middle", photos.middle);
+    formData.append("middle_scale_adjust", String(scale.middle));
+  }
   formData.append("mosaic", String(mosaic));
-  formData.append("scale_adjust", String(scaleAdjust));
+  formData.append("scale_adjust", String(scale.after));
   // 자동으로 찾은 점은 눈썹인 걸 알기 때문에 그 선을 수평으로 맞춘다. 직접 찍은 점은
   // 무엇인지 알 수 없어 방향을 강제하지 않는다.
   formData.append("level", String(level));
@@ -132,6 +152,7 @@ async function processPair(
       "points",
       JSON.stringify({
         before: manual.before.map((p) => [p.x, p.y]),
+        ...(photos.middle ? { middle: manual.middle.map((p) => [p.x, p.y]) } : {}),
         after: manual.after.map((p) => [p.x, p.y]),
       }),
     );
@@ -148,20 +169,22 @@ async function processPair(
     throw new Error(detail || failureMessage(res.status));
   }
 
-  const data: { before: string; after: string; warnings?: string[] } = await res.json();
-  const [beforeBlob, afterBlob] = await Promise.all([
+  const data: { before: string; middle?: string; after: string; warnings?: string[] } = await res.json();
+  const [beforeBlob, middleBlob, afterBlob] = await Promise.all([
     fetch(data.before).then((r) => r.blob()),
+    data.middle ? fetch(data.middle).then((r) => r.blob()) : Promise.resolve(null),
     fetch(data.after).then((r) => r.blob()),
   ]);
-  return { before: beforeBlob, after: afterBlob, warnings: data.warnings ?? [] };
+  return { before: beforeBlob, middle: middleBlob, after: afterBlob, warnings: data.warnings ?? [] };
 }
 
 /** 얼굴 검출이 안 되는 사진에서 눈썹 양 끝 위치를 제안받는다.
  *  실패해도 오류로 다루지 않는다 — 제안이 없으면 사용자가 직접 찍으면 된다. */
-async function fetchSuggestedPoints(before: File, after: File) {
+async function fetchSuggestedPoints(photos: Photos) {
   const formData = new FormData();
-  formData.append("before", before);
-  formData.append("after", after);
+  formData.append("before", photos.before);
+  formData.append("after", photos.after);
+  if (photos.middle) formData.append("middle", photos.middle);
   const res = await fetch(`${API_BASE_URL}/api/suggest-points`, {
     method: "POST",
     headers: { "X-App-Password": getStoredPassword() },
@@ -171,14 +194,17 @@ async function fetchSuggestedPoints(before: File, after: File) {
   const data: {
     available: boolean;
     before: [number, number][] | null;
+    middle?: [number, number][] | null;
     after: [number, number][] | null;
     labels?: string[];
     level?: boolean;
   } = await res.json();
   if (!data.available || !data.before || !data.after) return null;
+  if (photos.middle && !data.middle) return null;
   const toPoints = (pairs: [number, number][]) => pairs.map(([x, y]) => ({ x, y }));
   return {
     before: toPoints(data.before),
+    middle: data.middle ? toPoints(data.middle) : [],
     after: toPoints(data.after),
     labels: data.labels ?? [],
     level: data.level ?? false,
@@ -222,11 +248,12 @@ const LANDMARK_NAMES: Record<string, string> = {
   ear_lobe: "귓불",
 };
 
-/** 이미 변환이 끝난 두 장을 보내서 전→후로 스르륵 넘어가는 GIF를 받아온다. */
-async function buildGif(before: Blob, after: Blob): Promise<Blob> {
+/** 이미 변환이 끝난 사진들을 보내서 전→(중간→)후로 스르륵 넘어가는 GIF를 받아온다. */
+async function buildGif(results: Results): Promise<Blob> {
   const formData = new FormData();
-  formData.append("before", before, "before.jpg");
-  formData.append("after", after, "after.jpg");
+  formData.append("before", results.before, "before.jpg");
+  if (results.middle) formData.append("middle", results.middle, "middle.jpg");
+  formData.append("after", results.after, "after.jpg");
 
   const res = await postForm("/api/gif", formData);
   if (!res.ok) throw new Error("GIF 생성에 실패했습니다.");
@@ -254,23 +281,11 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-/** 한 화면에서 동시에 다룰 수 있는 전/후 사진 쌍의 수.
- *  운영 서버는 인스턴스당 동시 처리가 2라(README 배포 참고) 셋째 요청은 다른 인스턴스로
- *  가거나 잠깐 기다린다. 이보다 늘리면 기다리는 시간이 눈에 띄게 길어진다. */
-const MAX_PAIRS = 3;
-
-interface PairWorkspaceProps {
-  title: string;
-  /** 값이 바뀔 때마다 변환할 수 있는 상태면 변환을 시작한다 ("모두 변환" 버튼). */
-  transformSignal: number;
-  /** 지금 이 쌍을 변환할 수 있는지(전/후 사진이 다 있고 대기 중인지)를 위로 알린다. */
-  onReadyChange: (ready: boolean) => void;
-  onRemove?: () => void;
-}
-
-function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: PairWorkspaceProps) {
+function App() {
   const [beforePhoto, setBeforePhoto] = useState<File | null>(null);
   const [afterPhoto, setAfterPhoto] = useState<File | null>(null);
+  // 경과 사진의 중간 시점 (선택). 넣으면 전/중간/후 세 장을 한 틀에 맞춘다.
+  const [middlePhoto, setMiddlePhoto] = useState<File | null>(null);
   const [status, setStatus] = useState<Status>("idle");
   const [mosaicStatus, setMosaicStatus] = useState<MosaicStatus>("idle");
   const [baseResult, setBaseResult] = useState<ResultSet | null>(null);
@@ -283,6 +298,7 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
   const [picking, setPicking] = useState(false);
   const [beforePoints, setBeforePoints] = useState<NormalizedPoint[]>([]);
   const [afterPoints, setAfterPoints] = useState<NormalizedPoint[]>([]);
+  const [middlePoints, setMiddlePoints] = useState<NormalizedPoint[]>([]);
   const [usedManual, setUsedManual] = useState(false);
   // 직접 지정으로 변환하기 직전의 결과. "변환 취소"로 되돌릴 수 있게 들고 있는다.
   const [preManualResult, setPreManualResult] = useState<ResultSet | null>(null);
@@ -291,11 +307,19 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
   // 눈썹을 자동으로 찾아 맞춘 결과인지. 사용자가 그 사실을 알아야 검토할 수 있다.
   const [autoAligned, setAutoAligned] = useState(false);
   const [autoLabels, setAutoLabels] = useState<string[]>([]);
-  // 밝기·색감·크기 조절값. 셋 다 같은 방식으로 다시 계산하므로 한 덩어리로 다룬다.
-  const [adjust, setAdjust] = useState({ brightness: 1, tone: 1, scale: 1 });
+  // 밝기·색감·크기 조절값. 모두 같은 방식으로 다시 계산하므로 한 덩어리로 다룬다.
+  const [adjust, setAdjust] = useState(INITIAL_ADJUST);
   const [adjustBusy, setAdjustBusy] = useState(false);
   // 계산 중에 슬라이더를 또 움직이면 여기 담아뒀다가 끝난 뒤 한 번만 더 계산한다.
   const pendingAdjust = useRef<{ values: typeof adjust; preview: boolean } | null>(null);
+  // 사진이 바뀔 때마다 올린다. 서버 응답이 오는 사이에 사진이 바뀌었으면 그 응답은 옛 사진
+  // 기준이라 버린다 — 그대로 쓰면 예컨대 처리 중에 중간 사진을 넣었을 때 2장 결과가 "완료"로
+  // 남고, 이어서 조절하면 중간 기준점 없이 요청이 나가 서버가 거절했다.
+  const photosVersion = useRef(0);
+  function staleChecker() {
+    const version = photosVersion.current;
+    return () => photosVersion.current !== version;
+  }
   // 지금 화면의 결과를 만들 때 쓴 기준점. 크기만 조정할 때 다시 찾지 않고 그대로 쓴다
   // (자동 탐색은 15~20초가 걸리고 호출 요금도 든다).
   const [lastPoints, setLastPoints] = useState<ManualPoints | undefined>(undefined);
@@ -317,10 +341,11 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
   // 칠하기 화면에 띄울 "자동 모자이크까지 들어간" 미리보기. 칠하기 전에 얼굴이 이미
   // 가려진 모습을 봐야, 어디를 더 칠해야 하는지 알 수 있다.
   type MosaicImage = { blob: Blob; url: string } | null;
-  const [facePreview, setFacePreview] = useState<{ before: MosaicImage; after: MosaicImage }>({
-    before: null,
-    after: null,
-  });
+  const [facePreview, setFacePreview] = useState<{
+    before: MosaicImage;
+    middle: MosaicImage;
+    after: MosaicImage;
+  }>({ before: null, middle: null, after: null });
   const [facePreviewBusy, setFacePreviewBusy] = useState(false);
   const [facePreviewNotice, setFacePreviewNotice] = useState<string | null>(null);
   // 모자이크를 만드는 동안의 진행 상황. 사진 한 장이 한 단계다.
@@ -331,21 +356,27 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
   } | null>(null);
 
   const displayed = showingMosaic && mosaicResult ? mosaicResult : baseResult;
+  // 변환에 보낼 사진 묶음. 전/후가 다 있어야 만들어진다 (중간은 선택).
+  const photos: Photos | null =
+    beforePhoto && afterPhoto ? { before: beforePhoto, middle: middlePhoto, after: afterPhoto } : null;
 
   // 칠하기 화면에 띄울 원본 미리보기. 파일이 바뀔 때만 다시 만들고 쓰고 나면 해제한다.
-  const [sourceUrls, setSourceUrls] = useState<{ before: string | null; after: string | null }>({
-    before: null,
-    after: null,
-  });
+  const [sourceUrls, setSourceUrls] = useState<{
+    before: string | null;
+    middle: string | null;
+    after: string | null;
+  }>({ before: null, middle: null, after: null });
   useEffect(() => {
     const before = beforePhoto ? URL.createObjectURL(beforePhoto) : null;
+    const middle = middlePhoto ? URL.createObjectURL(middlePhoto) : null;
     const after = afterPhoto ? URL.createObjectURL(afterPhoto) : null;
-    setSourceUrls({ before, after });
+    setSourceUrls({ before, middle, after });
     return () => {
       if (before) URL.revokeObjectURL(before);
+      if (middle) URL.revokeObjectURL(middle);
       if (after) URL.revokeObjectURL(after);
     };
-  }, [beforePhoto, afterPhoto]);
+  }, [beforePhoto, middlePhoto, afterPhoto]);
 
   /** 변환 요청에 같이 보낼, 결과 위에 칠한 자국. */
   function strokePayload() {
@@ -360,6 +391,7 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
     return (
       suggestedLevel &&
       same(points.before, suggestedPoints.before) &&
+      same(points.middle, suggestedPoints.middle) &&
       same(points.after, suggestedPoints.after)
     );
   }
@@ -384,7 +416,7 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
     setMosaicStatus("idle");
     setUsedManual(false);
     setAutoAligned(false);
-    setAdjust({ brightness: 1, tone: 1, scale: 1 });
+    setAdjust(INITIAL_ADJUST);
     pendingAdjust.current = null;
     setLastPoints(undefined);
     setSuggestedPoints(null);
@@ -400,6 +432,7 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
   function resetPicking() {
     setPicking(false);
     setBeforePoints([]);
+    setMiddlePoints([]);
     setAfterPoints([]);
     setSuggestFailed(false);
   }
@@ -408,16 +441,17 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
   async function handleStartPicking() {
     setPicking(true);
     setSuggestFailed(false);
-    if (!beforePhoto || !afterPhoto) return;
+    if (!photos) return;
     // 이미 찍어둔 점이 있으면(변환 취소로 돌아온 경우) 덮어쓰지 않는다.
-    if (beforePoints.length || afterPoints.length) return;
+    if (beforePoints.length || middlePoints.length || afterPoints.length) return;
     setSuggesting(true);
     try {
-      const suggested = await fetchSuggestedPoints(beforePhoto, afterPhoto);
+      const suggested = await fetchSuggestedPoints(photos);
       if (suggested) {
         setBeforePoints(suggested.before);
+        setMiddlePoints(suggested.middle);
         setAfterPoints(suggested.after);
-        setSuggestedPoints({ before: suggested.before, after: suggested.after });
+        setSuggestedPoints({ before: suggested.before, middle: suggested.middle, after: suggested.after });
         setSuggestedLevel(suggested.level);
       } else {
         setSuggestFailed(true);
@@ -430,6 +464,7 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
   }
 
   function handleBeforeChange(file: File | null) {
+    photosVersion.current += 1;
     setBeforePhoto(file);
     setStatus("idle");
     resetResults();
@@ -438,6 +473,7 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
   }
 
   function handleAfterChange(file: File | null) {
+    photosVersion.current += 1;
     setAfterPhoto(file);
     setStatus("idle");
     resetResults();
@@ -445,16 +481,28 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
     setError(null);
   }
 
+  /** 중간 사진만 바뀌면 전/후에 찍어둔 기준점은 그대로 쓸 수 있으니 중간 점만 비운다. */
+  function handleMiddleChange(file: File | null) {
+    photosVersion.current += 1;
+    setMiddlePhoto(file);
+    setStatus("idle");
+    resetResults();
+    setMiddlePoints([]);
+    setError(null);
+  }
+
   async function handleTransform(manual?: ManualPoints) {
-    if (!beforePhoto || !afterPhoto) return;
+    if (!photos) return;
+    const isStale = staleChecker();
     setStatus("processing");
     setError(null);
     setSuggestFailed(false);
     try {
       const first = await processPair(
-        beforePhoto, afterPhoto, false, manual, 1, isSuggested(manual),
+        photos, false, manual, undefined, isSuggested(manual),
         adjust.brightness, adjust.tone, false, strokePayload(),
       );
+      if (isStale()) return;
 
       // 얼굴을 못 찾았으면 눈썹 위치를 자동으로 받아 한 번 더 맞춰본다. 사용자가 점을
       // 찍지 않아도 변환 한 번으로 끝나고, 결과가 어긋나면 "변환 취소"로 고칠 수 있다.
@@ -462,13 +510,13 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
       if (!manual && isFaceMissing(first.warnings)) {
         setSuggesting(true);
         try {
-          const suggested = await fetchSuggestedPoints(beforePhoto, afterPhoto);
+          const suggested = await fetchSuggestedPoints(photos);
           if (suggested) {
-            const points = { before: suggested.before, after: suggested.after };
+            const points = { before: suggested.before, middle: suggested.middle, after: suggested.after };
             auto = {
               points,
               result: await processPair(
-                beforePhoto, afterPhoto, false, points, 1, suggested.level,
+                photos, false, points, undefined, suggested.level,
                 adjust.brightness, adjust.tone, false, strokePayload(),
               ),
             };
@@ -484,6 +532,7 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
           setSuggesting(false);
         }
       }
+      if (isStale()) return;
 
       const shown = auto ? auto.result : first;
       const points = manual ?? auto?.points;
@@ -495,6 +544,7 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
         revokeResultSet(preManualResult);
         setPreManualResult(toResultSet(first));
         setBeforePoints(auto.points.before);
+        setMiddlePoints(auto.points.middle);
         setAfterPoints(auto.points.after);
       } else if (manual) {
         // 되돌릴 수 있도록 직전 결과는 해제하지 않고 보관한다.
@@ -513,38 +563,42 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
       setUsedManual(Boolean(points));
       setAutoAligned(Boolean(auto));
       setLastPoints(points);
-      setAdjust({ brightness: 1, tone: 1, scale: 1 });
+      setAdjust(INITIAL_ADJUST);
       if (!auto) setAutoLabels([]);
       clearGif();
       setStatus("done");
       if (points) setPicking(false);
       else if (!isFaceMissing(shown.warnings)) resetPicking();
     } catch (cause) {
+      if (isStale()) return;
       setError(messageOf(cause, "변환 중 문제가 발생했습니다. 다시 시도해주세요."));
       setStatus("idle");
     }
   }
 
   async function handleApplyMosaic() {
-    if (!beforePhoto || !afterPhoto) return;
+    if (!photos) return;
     // 이미 한 번 계산해둔 모자이크 결과가 있으면 다시 요청하지 않고 바로 보여준다.
     if (mosaicResult) {
       setShowingMosaic(true);
       clearGif();
       return;
     }
+    const isStale = staleChecker();
     setMosaicStatus("processing");
     setError(null);
     try {
       const processed = await processPair(
-        beforePhoto, afterPhoto, true, lastPoints, adjust.scale, isSuggested(lastPoints),
+        photos, true, lastPoints, { after: adjust.scale, middle: adjust.middleScale }, isSuggested(lastPoints),
         adjust.brightness, adjust.tone, false, strokePayload(),
       );
+      if (isStale()) return;
       setMosaicResult(toResultSet(processed));
       setShowingMosaic(true);
       clearGif();
       setMosaicStatus("done");
     } catch (cause) {
+      if (isStale()) return;
       setError(messageOf(cause, "모자이크 처리 중 문제가 발생했습니다. 다시 시도해주세요."));
       setMosaicStatus("idle");
     }
@@ -556,23 +610,25 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
    *  원본 크기로 한 번 더 받아 확정한다. 요청은 한 번에 하나씩만 나간다 — 처리 중에 또
    *  움직이면 마지막 값만 담아뒀다가 끝난 뒤 이어서 계산한다. */
   async function applyAdjust(next: Partial<typeof adjust>, preview = false) {
-    if (!beforePhoto || !afterPhoto || status !== "done") return;
+    if (!photos || status !== "done") return;
     const values = { ...adjust, ...next };
     setAdjust(values);
     if (adjustBusy) {
       pendingAdjust.current = { values, preview };
       return;
     }
+    const isStale = staleChecker();
     setAdjustBusy(true);
     setError(null);
     let current = { values, preview };
     try {
       for (;;) {
         const processed = await processPair(
-          beforePhoto, afterPhoto, false, lastPoints, current.values.scale,
+          photos, false, lastPoints, { after: current.values.scale, middle: current.values.middleScale },
           isSuggested(lastPoints), current.values.brightness, current.values.tone,
           current.preview, strokePayload(),
         );
+        if (isStale()) break;
         // 직전 결과의 URL은 함수형 갱신으로 해제한다. 미리보기가 빠르게 이어지는 동안
         // 오래된 값을 붙잡고 있으면 URL이 새어나간다.
         setBaseResult((previous) => {
@@ -591,7 +647,7 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
         pendingAdjust.current = null;
       }
     } catch (cause) {
-      setError(messageOf(cause, "조절에 실패했습니다. 다시 시도해주세요."));
+      if (!isStale()) setError(messageOf(cause, "조절에 실패했습니다. 다시 시도해주세요."));
     } finally {
       pendingAdjust.current = null;
       setAdjustBusy(false);
@@ -616,15 +672,17 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
 
   /** 결과를 지금 값 그대로 다시 계산한다. 결과에 칠한 자국을 바꾼 뒤 반영할 때 쓴다. */
   async function recomputeResult() {
-    if (!beforePhoto || !afterPhoto) return;
+    if (!photos) return;
     const useMosaic = showingMosaic;
+    const isStale = staleChecker();
     setAdjustBusy(true);
     setError(null);
     try {
       const processed = await processPair(
-        beforePhoto, afterPhoto, useMosaic, lastPoints, adjust.scale, isSuggested(lastPoints),
+        photos, useMosaic, lastPoints, { after: adjust.scale, middle: adjust.middleScale }, isSuggested(lastPoints),
         adjust.brightness, adjust.tone, false, strokePayload(),
       );
+      if (isStale()) return;
       const next = toResultSet(processed);
       if (showingMosaic) {
         setMosaicResult((previous) => {
@@ -654,8 +712,9 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
   function clearFacePreview() {
     setFacePreview((previous) => {
       if (previous.before) URL.revokeObjectURL(previous.before.url);
+      if (previous.middle) URL.revokeObjectURL(previous.middle.url);
       if (previous.after) URL.revokeObjectURL(previous.after.url);
-      return { before: null, after: null };
+      return { before: null, middle: null, after: null };
     });
     setFacePreviewNotice(null);
     setMosaicProgress(null);
@@ -666,17 +725,19 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
    *  큰 사진은 한 장에 2초 남짓 걸린다. 두 장을 한 번에 기다리게 하면 멈춘 것처럼 보여서,
    *  먼저 끝난 사진이라도 바로 보여준다. */
   async function buildMosaics(face: boolean, strokes: StrokeSides) {
-    const jobs: { side: "before" | "after"; label: string; photo: File; strokes: BrushStroke[] }[] = [];
+    const jobs: { side: Side; label: string; photo: File; strokes: BrushStroke[] }[] = [];
     if (beforePhoto) jobs.push({ side: "before", label: "전", photo: beforePhoto, strokes: strokes.before });
+    if (middlePhoto) jobs.push({ side: "middle", label: "중간", photo: middlePhoto, strokes: strokes.middle });
     if (afterPhoto) jobs.push({ side: "after", label: "후", photo: afterPhoto, strokes: strokes.after });
 
-    const made: { before: Blob | null; after: Blob | null } = { before: null, after: null };
+    const made: Record<Side, Blob | null> = { before: null, middle: null, after: null };
     const notices: string[] = [];
     for (const [index, job] of jobs.entries()) {
       setMosaicProgress({ done: index, total: jobs.length, label: `${job.label} 사진` });
       const { blob, warnings } = await mosaicOne(job.photo, face, job.strokes);
       made[job.side] = blob;
-      notices.push(...warnings.map((w) => `${job.label} 사진: ${w}`));
+      // 한 장씩 "before" 칸으로 보내므로 서버는 늘 "전 사진: "을 붙여 돌려준다. 실제 이름으로 바꾼다.
+      notices.push(...warnings.map((w) => `${job.label} 사진: ${w.replace(/^전 사진: /, "")}`));
       const url = URL.createObjectURL(blob);
       setFacePreview((previous) => {
         const old = previous[job.side];
@@ -735,11 +796,25 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
     setError(null);
     try {
       // 들어올 때 만든 것이 곧 저장할 파일이다 — 더 칠한 게 없으면 다시 만들지 않는다.
-      const ready = facePreview.before && maskFace && !hasStrokes(sourceStrokes);
+      // 넣은 사진이 하나라도 미리보기에서 빠졌으면(그 사진 요청만 실패한 경우) 다시 만든다 —
+      // 그대로 쓰면 그 사진이 다운로드에서 말없이 빠진다.
+      const ready =
+        maskFace &&
+        !hasStrokes(sourceStrokes) &&
+        facePreview.before &&
+        (!middlePhoto || facePreview.middle) &&
+        (!afterPhoto || facePreview.after);
       const files = ready
-        ? { before: facePreview.before!.blob, after: facePreview.after?.blob ?? null }
+        ? {
+            before: facePreview.before!.blob,
+            middle: facePreview.middle?.blob ?? null,
+            after: facePreview.after?.blob ?? null,
+          }
         : (await buildMosaics(maskFace, sourceStrokes)).made;
       if (files.before) downloadBlob(files.before, withJpgName(beforePhoto.name, "mosaic"));
+      if (files.middle && middlePhoto) {
+        downloadBlob(files.middle, withJpgName(middlePhoto.name, "mosaic"));
+      }
       if (files.after && afterPhoto) {
         downloadBlob(files.after, withJpgName(afterPhoto.name, "mosaic"));
       }
@@ -759,6 +834,9 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
   function handleDownload() {
     if (!displayed || !beforePhoto || !afterPhoto) return;
     downloadBlob(displayed.results.before, withJpgName(beforePhoto.name, "before"));
+    if (displayed.results.middle && middlePhoto) {
+      downloadBlob(displayed.results.middle, withJpgName(middlePhoto.name, "middle"));
+    }
     downloadBlob(displayed.results.after, withJpgName(afterPhoto.name, "after"));
   }
 
@@ -768,7 +846,7 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
     setError(null);
     try {
       // 화면에 보이는 버전을 그대로 쓴다 — 모자이크를 적용해 뒀다면 GIF도 모자이크본이 된다.
-      const blob = await buildGif(displayed.results.before, displayed.results.after);
+      const blob = await buildGif(displayed.results);
       clearGif();
       setGifResult({ blob, url: URL.createObjectURL(blob) });
     } catch {
@@ -784,43 +862,22 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
   }
 
   const canTransform = Boolean(beforePhoto && afterPhoto) && status === "idle";
-
-  useEffect(() => {
-    onReadyChange(canTransform);
-  }, [canTransform, onReadyChange]);
-
-  // 처음 그릴 때의 값은 건너뛴다 — 새로 추가한 쌍이 바로 변환을 시작하면 안 된다.
-  const lastSignal = useRef(transformSignal);
-  useEffect(() => {
-    if (transformSignal === lastSignal.current) return;
-    lastSignal.current = transformSignal;
-    if (canTransform && !painting && !picking) void handleTransform();
-    // handleTransform은 매 렌더 새로 만들어지므로 신호가 바뀔 때만 반응하게 둔다.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transformSignal]);
-
   const faceMissing = Boolean(displayed && isFaceMissing(displayed.results.warnings));
-  // 찍은 순서가 전/후의 대응 관계라 개수가 같아야 한다.
-  const pointsReady =
-    beforePoints.length >= 2 && beforePoints.length === afterPoints.length;
+  // 찍은 순서가 사진끼리의 대응 관계라 개수가 모두 같아야 한다.
+  const pointCounts = [beforePoints.length, ...(middlePhoto ? [middlePoints.length] : []), afterPoints.length];
+  const pointsReady = pointCounts.every((n) => n >= 2 && n === pointCounts[0]);
   const pointCountMismatch =
-    beforePoints.length >= 2 && afterPoints.length >= 2 && beforePoints.length !== afterPoints.length;
+    pointCounts.every((n) => n >= 2) && pointCounts.some((n) => n !== pointCounts[0]);
 
   return (
-    <section className="pair">
-      <div className="pair-header">
-        <h2 className="pair-title">{title}</h2>
-        {onRemove && (
-          <button
-            type="button"
-            className="link-btn"
-            disabled={status === "processing" || adjustBusy || mosaicStatus === "processing"}
-            onClick={onRemove}
-          >
-            이 쌍 빼기
-          </button>
-        )}
-      </div>
+    <div className="page">
+      <header className="page-header">
+        <h1>전후사진 변환</h1>
+        <p>
+          전/후 사진을 넣고 변환한 뒤 다운로드하세요. 경과를 함께 보려면 <strong>중간</strong> 사진도
+          넣으세요 — 세 장을 같은 틀에 맞춥니다.
+        </p>
+      </header>
 
       <section className="photo-grid">
         <PhotoDropzone
@@ -828,6 +885,12 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
           file={beforePhoto}
           onChange={handleBeforeChange}
           resultUrl={displayed?.urls.before}
+        />
+        <PhotoDropzone
+          label="중간 (선택)"
+          file={middlePhoto}
+          onChange={handleMiddleChange}
+          resultUrl={displayed?.urls.middle}
         />
         <PhotoDropzone
           label="후 (After)"
@@ -957,6 +1020,17 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
                     }
                   />
                 )}
+                {sourceUrls.middle && (
+                  <BrushCanvas
+                    label="중간"
+                    src={facePreview.middle?.url ?? sourceUrls.middle}
+                    radius={brushRadius}
+                    strokes={sourceStrokes.middle}
+                    onChange={(update) =>
+                      setSourceStrokes((prev) => ({ ...prev, middle: update(prev.middle) }))
+                    }
+                  />
+                )}
                 {sourceUrls.after && (
                   <BrushCanvas
                     label="후 (After)"
@@ -981,6 +1055,17 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
                       setResultStrokes((prev) => ({ ...prev, before: update(prev.before) }))
                     }
                   />
+                  {displayed.urls.middle && (
+                    <BrushCanvas
+                      label="중간"
+                      src={displayed.urls.middle}
+                      radius={brushRadius}
+                      strokes={resultStrokes.middle}
+                      onChange={(update) =>
+                        setResultStrokes((prev) => ({ ...prev, middle: update(prev.middle) }))
+                      }
+                    />
+                  )}
                   <BrushCanvas
                     label="후 (After)"
                     src={displayed.urls.after}
@@ -1040,10 +1125,10 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
             </p>
           )}
           <p className="picker-guide">
-            두 사진에서 <strong>같은 자리</strong>를 <strong>같은 순서로</strong> 클릭해주세요.
+            {middlePhoto ? "세" : "두"} 사진에서 <strong>같은 자리</strong>를 <strong>같은 순서로</strong> 클릭해주세요.
             최소 2곳이면 되고, <strong>최대한 멀리 떨어진</strong> 지점을 고르는 게 가장 효과가
             큽니다 — 간격을 2배로 벌리면 오차가 절반으로 줄어듭니다. 가로·세로·대각선 아무
-            방향이나 괜찮습니다. 사진은 원래 방향 그대로 두고, 후 사진만 전 사진에 맞춰 돌립니다.
+            방향이나 괜찮습니다. 전 사진은 원래 방향 그대로 두고, 나머지 사진을 전 사진에 맞춰 돌립니다.
           </p>
           <p className="picker-guide">
             뚜렷하게 알아볼 수 있는 지점이 더 있으면 3~4곳까지 찍어도 좋습니다. 그러면 서로
@@ -1052,19 +1137,25 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
           </p>
           <div className="picker-grid">
             <PointPicker label="전 (Before)" file={beforePhoto} points={beforePoints} onChange={setBeforePoints} />
+            {middlePhoto && (
+              <PointPicker label="중간" file={middlePhoto} points={middlePoints} onChange={setMiddlePoints} />
+            )}
             <PointPicker label="후 (After)" file={afterPhoto} points={afterPoints} onChange={setAfterPoints} />
           </div>
           <div className="actions">
             {pointCountMismatch && (
               <span className="error-note">
-                전 {beforePoints.length}곳, 후 {afterPoints.length}곳 — 개수를 같게 맞춰주세요.
+                전 {beforePoints.length}곳{middlePhoto ? `, 중간 ${middlePoints.length}곳` : ""}, 후{" "}
+                {afterPoints.length}곳 — 개수를 같게 맞춰주세요.
               </span>
             )}
             <button
               type="button"
               className="submit-btn"
               disabled={!pointsReady || status === "processing"}
-              onClick={() => handleTransform({ before: beforePoints, after: afterPoints })}
+              onClick={() =>
+                handleTransform({ before: beforePoints, middle: middlePhoto ? middlePoints : [], after: afterPoints })
+              }
             >
               {status === "processing" ? "처리 중..." : "이 지점으로 변환"}
             </button>
@@ -1099,6 +1190,19 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
             onPreview={(value) => applyAdjust({ tone: value }, true)}
             onCommit={(value) => applyAdjust({ tone: value })}
           />
+          {middlePhoto && (
+            <AdjustSlider
+              label="중간 사진 크기"
+              value={adjust.middleScale}
+              min={SCALE_MIN}
+              max={SCALE_MAX}
+              step={SCALE_STEP}
+              busy={adjustBusy}
+              hint="전 사진과 두상 크기가 안 맞으면 끌어서 맞춰주세요"
+              onPreview={(value) => applyAdjust({ middleScale: value }, true)}
+              onCommit={(value) => applyAdjust({ middleScale: value })}
+            />
+          )}
           <AdjustSlider
             label="후 사진 크기"
             value={adjust.scale}
@@ -1179,84 +1283,6 @@ function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: Pair
           </>
         )}
         {error && <span className="error-note">{error}</span>}
-      </div>
-    </section>
-  );
-}
-
-function App() {
-  // 쌍마다 고유 번호를 준다. 중간 쌍을 빼도 나머지 쌍의 상태가 뒤섞이지 않게 key로 쓴다.
-  const nextId = useRef(2);
-  const [pairIds, setPairIds] = useState<number[]>([1]);
-  const [readyIds, setReadyIds] = useState<Set<number>>(new Set());
-  const [transformSignal, setTransformSignal] = useState(0);
-
-  const setReady = useCallback((id: number, ready: boolean) => {
-    setReadyIds((previous) => {
-      if (previous.has(id) === ready) return previous;
-      const next = new Set(previous);
-      if (ready) next.add(id);
-      else next.delete(id);
-      return next;
-    });
-  }, []);
-  // 쌍마다 같은 함수를 계속 넘겨야 자식의 effect가 렌더마다 다시 돌지 않는다.
-  const readyHandlers = useRef(new Map<number, (ready: boolean) => void>());
-  function readyHandlerFor(id: number) {
-    let handler = readyHandlers.current.get(id);
-    if (!handler) {
-      handler = (ready: boolean) => setReady(id, ready);
-      readyHandlers.current.set(id, handler);
-    }
-    return handler;
-  }
-
-  function addPair() {
-    if (pairIds.length >= MAX_PAIRS) return;
-    setPairIds((ids) => [...ids, nextId.current++]);
-  }
-
-  function removePair(id: number) {
-    setPairIds((ids) => ids.filter((x) => x !== id));
-    setReady(id, false);
-    readyHandlers.current.delete(id);
-  }
-
-  const readyCount = pairIds.filter((id) => readyIds.has(id)).length;
-
-  return (
-    <div className="page">
-      <header className="page-header">
-        <h1>전후사진 변환</h1>
-        <p>전/후 사진을 넣고 변환한 뒤 다운로드하세요. 사진 쌍은 {MAX_PAIRS}개까지 한 번에 변환할 수 있습니다.</p>
-      </header>
-
-      {pairIds.map((id, index) => (
-        <PairWorkspace
-          key={id}
-          title={`${index + 1}번 사진`}
-          transformSignal={transformSignal}
-          onReadyChange={readyHandlerFor(id)}
-          onRemove={pairIds.length > 1 ? () => removePair(id) : undefined}
-        />
-      ))}
-
-      <div className="actions pair-bar">
-        {pairIds.length < MAX_PAIRS && (
-          <button type="button" className="submit-btn submit-btn--secondary" onClick={addPair}>
-            + 사진 쌍 추가 ({pairIds.length}/{MAX_PAIRS})
-          </button>
-        )}
-        {pairIds.length > 1 && (
-          <button
-            type="button"
-            className="submit-btn"
-            disabled={readyCount === 0}
-            onClick={() => setTransformSignal((n) => n + 1)}
-          >
-            {readyCount > 0 ? `${readyCount}쌍 모두 변환` : "모두 변환"}
-          </button>
-        )}
       </div>
     </div>
   );

@@ -246,19 +246,21 @@ def can_level(labels: list[str]) -> bool:
 
 
 def matched_points(
-    before_bytes: bytes, after_bytes: bytes
-) -> tuple[list[tuple[float, float]], list[tuple[float, float]], list[str]] | None:
-    """전/후 사진 양쪽에서 모두 찾은 기준점만 짝지어 돌려준다.
+    images: list[bytes],
+) -> tuple[list[list[tuple[float, float]]], list[str]] | None:
+    """모든 사진(전·중간·후)에서 공통으로 찾은 기준점만 짝지어 돌려준다.
+
+    돌려주는 것: (사진 순서대로 각 사진의 점 목록, 지점 이름)
 
     한쪽에만 있는 지점은 대응이 성립하지 않아 쓸 수 없다. 이마 클로즈업에서는 눈썹 양 끝만
-    남는 경우가 대부분이지만, 귀처럼 더 멀리 있는 지점이 양쪽에 다 보이면 기준선이 그만큼
+    남는 경우가 대부분이지만, 귀처럼 더 멀리 있는 지점이 모두에 보이면 기준선이 그만큼
     길어져 배율·각도가 정확해진다 — 간격을 2배로 벌리면 오차가 절반이 된다."""
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        before, after = pool.map(suggest_landmarks, (before_bytes, after_bytes))
+    with ThreadPoolExecutor(max_workers=len(images)) as pool:
+        found = list(pool.map(suggest_landmarks, images))
 
-    common = [name for name, _ in LANDMARKS if name in before and name in after]
+    common = [name for name, _ in LANDMARKS if all(name in landmarks for landmarks in found)]
     if len(common) < 2:
-        logger.info("suggest: 양쪽 공통 지점이 %d개뿐이라 제안하지 않음", len(common))
+        logger.info("suggest: 공통 지점이 %d개뿐이라 제안하지 않음", len(common))
         return None
     logger.info("suggest: 공통 기준점 %s", common)
-    return [before[name] for name in common], [after[name] for name in common], common
+    return [[landmarks[name] for name in common] for landmarks in found], common

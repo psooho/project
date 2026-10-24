@@ -12,36 +12,38 @@ GIF_HOLD_MS = 1200
 GIF_FADE_MS = 80
 
 
-def build_crossfade_gif(before: Image.Image, after: Image.Image) -> bytes:
-    """전 사진 → 후 사진으로 스르륵 넘어가는 GIF를 만든다.
+def build_crossfade_gif(images: list[Image.Image]) -> bytes:
+    """전 → (중간 →) 후 사진으로 차례로 스르륵 넘어가는 GIF를 만든다.
 
-    GIF는 자동으로 반복 재생되므로, 후 사진에서 다시 전 사진으로 되돌아오는 구간까지
+    GIF는 자동으로 반복 재생되므로, 마지막 사진에서 다시 전 사진으로 되돌아오는 구간까지
     넣어야 이어붙는 지점이 튀지 않는다."""
-    before = before.convert("RGB")
-    after = after.convert("RGB")
+    images = [image.convert("RGB") for image in images]
+    first = images[0]
 
-    # 파이프라인 결과는 두 장의 크기가 같지만, 혹시 다르면 맞춰준다.
-    if before.size != after.size:
-        after = after.resize(before.size, Image.LANCZOS)
+    # 파이프라인 결과는 모두 크기가 같지만, 혹시 다르면 맞춰준다.
+    images = [first] + [
+        image if image.size == first.size else image.resize(first.size, Image.LANCZOS)
+        for image in images[1:]
+    ]
 
-    if before.width > GIF_MAX_WIDTH:
-        height = round(before.height * GIF_MAX_WIDTH / before.width)
-        before = before.resize((GIF_MAX_WIDTH, height), Image.LANCZOS)
-        after = after.resize((GIF_MAX_WIDTH, height), Image.LANCZOS)
+    if first.width > GIF_MAX_WIDTH:
+        height = round(first.height * GIF_MAX_WIDTH / first.width)
+        images = [image.resize((GIF_MAX_WIDTH, height), Image.LANCZOS) for image in images]
 
-    frames = [before]
+    frames = [images[0]]
     durations = [GIF_HOLD_MS]
 
-    for step in range(1, GIF_FADE_FRAMES + 1):
-        frames.append(Image.blend(before, after, step / (GIF_FADE_FRAMES + 1)))
-        durations.append(GIF_FADE_MS)
+    for current, following in zip(images, images[1:]):
+        for step in range(1, GIF_FADE_FRAMES + 1):
+            frames.append(Image.blend(current, following, step / (GIF_FADE_FRAMES + 1)))
+            durations.append(GIF_FADE_MS)
+        frames.append(following)
+        durations.append(GIF_HOLD_MS)
 
-    frames.append(after)
-    durations.append(GIF_HOLD_MS)
-
-    # 되돌아오는 구간 (반복 재생 시 매끄럽게 이어지도록)
+    # 되돌아오는 구간 (반복 재생 시 매끄럽게 이어지도록). 중간을 거치지 않고 마지막에서
+    # 전으로 바로 돌아간다 — 거꾸로 거쳐 가면 시간이 거꾸로 흐르는 것처럼 보인다.
     for step in range(GIF_FADE_FRAMES, 0, -1):
-        frames.append(Image.blend(before, after, step / (GIF_FADE_FRAMES + 1)))
+        frames.append(Image.blend(images[0], images[-1], step / (GIF_FADE_FRAMES + 1)))
         durations.append(GIF_FADE_MS)
 
     buffer = BytesIO()

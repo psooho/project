@@ -22,7 +22,7 @@ from .pipeline import (
     BrushStroke,
     UnusableResult,
     mosaic_only,
-    process_pair,
+    process_photos,
 )
 from .suggest import can_level, is_available as suggest_available, matched_points
 
@@ -170,17 +170,25 @@ MAX_BRUSH_STROKES = 200
 MAX_BRUSH_POINTS = 2000
 
 
-def _parse_strokes(raw: str, field: str) -> tuple[list[BrushStroke], list[BrushStroke]] | None:
-    """붓으로 칠한 자국을 검증한다.
+PAIR_SIDES = ("before", "after")
+# 경과 사진 3장. 전 사진이 기준이고 나머지를 거기에 맞춘다.
+SET_SIDES = ("before", "middle", "after")
+SIDE_NAMES = {"before": "전", "middle": "중간", "after": "후"}
 
-    형식: {"before": [{"radius": 0.03, "points": [[x, y], ...]}, ...], "after": [...]}
-    좌표는 사진 크기 대비 0~1 비율, 반지름은 짧은 변 대비 비율이다."""
+
+def _parse_strokes(
+    raw: str, field: str, side_keys: tuple[str, ...] = PAIR_SIDES
+) -> list[list[BrushStroke]] | None:
+    """붓으로 칠한 자국을 검증한다. 돌려주는 목록은 side_keys 순서를 따른다.
+
+    형식: {"before": [{"radius": 0.03, "points": [[x, y], ...]}, ...], "middle": [...], "after": [...]}
+    좌표는 사진 크기 대비 0~1 비율, 반지름은 짧은 변 대비 비율이다. 빠진 쪽은 빈 목록이다."""
     if not raw:
         return None
     try:
         data = json.loads(raw)
         sides: list[list[BrushStroke]] = []
-        for side in ("before", "after"):
+        for side in side_keys:
             raw_strokes = data.get(side) or []
             if len(raw_strokes) > MAX_BRUSH_STROKES:
                 raise ValueError(f"{side}: 칠한 자국이 너무 많습니다 ({len(raw_strokes)}개)")
@@ -196,24 +204,26 @@ def _parse_strokes(raw: str, field: str) -> tuple[list[BrushStroke], list[BrushS
                     raise ValueError(f"{side}: 칠한 자리가 사진 범위를 벗어났습니다")
                 strokes.append(BrushStroke(points=tuple(points), radius=radius))
             sides.append(strokes)
-        return sides[0], sides[1]
+        return sides
     except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail=f"{field}가 올바르지 않습니다: {exc}") from exc
 
 
-def _parse_manual_points(raw: str) -> tuple[list, list] | None:
-    """프론트엔드가 보낸 수동 기준점을 검증한다.
+def _parse_manual_points(raw: str, side_keys: tuple[str, ...] = PAIR_SIDES) -> list[list] | None:
+    """프론트엔드가 보낸 수동 기준점을 검증한다. 돌려주는 목록은 side_keys 순서를 따른다.
 
-    형식: {"before": [[x, y], ...], "after": [[x, y], ...]}  (각각 2~6개)
+    형식: {"before": [[x, y], ...], "middle": [...], "after": [[x, y], ...]}  (각각 2~6개)
     좌표는 사진 크기 대비 0~1 비율이다. 화면에 줄여 띄운 사진 위에서 클릭을 받으므로
     픽셀이 아니라 비율로 주고받아야 표시 크기와 원본 크기가 달라도 어긋나지 않는다.
-    찍은 순서가 전/후의 대응 관계이므로 개수가 같아야 한다."""
+    찍은 순서가 사진끼리의 대응 관계이므로 개수가 모두 같아야 한다."""
     if not raw:
         return None
     try:
         data = json.loads(raw)
         sides = {}
-        for side in ("before", "after"):
+        for side in side_keys:
+            if side not in data:
+                raise ValueError(f"{SIDE_NAMES[side]} 사진의 기준점이 없습니다")
             points = [(float(x), float(y)) for x, y in data[side]]
             if not 2 <= len(points) <= MAX_MANUAL_POINTS:
                 raise ValueError(f"{side}: 점은 2~{MAX_MANUAL_POINTS}개여야 합니다 (지금 {len(points)}개)")
@@ -225,9 +235,10 @@ def _parse_manual_points(raw: str) -> tuple[list, list] | None:
             if spread < MIN_MANUAL_SPREAD:
                 raise ValueError(f"{side}: 점들이 너무 가까이 모여 있습니다")
             sides[side] = points
-        if len(sides["before"]) != len(sides["after"]):
-            raise ValueError("전/후 사진의 점 개수가 다릅니다")
-        return sides["before"], sides["after"]
+        if len({len(points) for points in sides.values()}) > 1:
+            names = "/".join(SIDE_NAMES[side] for side in side_keys)
+            raise ValueError(f"{names} 사진의 점 개수가 다릅니다")
+        return [sides[side] for side in side_keys]
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail=f"기준점이 올바르지 않습니다: {exc}") from exc
 
@@ -236,41 +247,46 @@ def _parse_manual_points(raw: str) -> tuple[list, list] | None:
 async def process(
     before: UploadFile = File(...),
     after: UploadFile = File(...),
+    # 경과 사진의 중간 시점. 있으면 전/중간/후 세 장을 한 틀에 맞춘다.
+    middle: UploadFile | None = File(None),
     mosaic: bool = Form(False),
     points: str = Form(""),
     scale_adjust: float = Form(1.0),
+    middle_scale_adjust: float = Form(1.0),
     level: bool = Form(False),
     brightness_strength: float = Form(1.0),
     tone_strength: float = Form(1.0),
     preview: bool = Form(False),
     result_strokes: str = Form(""),
 ) -> dict:
-    manual_points = _parse_manual_points(points)
-    result = _parse_strokes(result_strokes, "결과에 칠한 자국")
+    side_keys = SET_SIDES if middle is not None else PAIR_SIDES
+    manual_points = _parse_manual_points(points, side_keys)
+    result = _parse_strokes(result_strokes, "결과에 칠한 자국", side_keys)
     if result:
-        logger.info("strokes: 결과에 칠한 자국 %d/%d", len(result[0]), len(result[1]))
+        logger.info("strokes: 결과에 칠한 자국 %s", "/".join(str(len(s)) for s in result))
     for name, value in (("밝기", brightness_strength), ("색감", tone_strength)):
         if not 0.0 <= value <= MAX_MATCH_STRENGTH:
             raise HTTPException(
                 status_code=400,
                 detail=f"{name} 보정 세기는 0~{MAX_MATCH_STRENGTH:.0%} 사이여야 합니다.",
             )
-    if not MIN_SCALE_ADJUST <= scale_adjust <= MAX_SCALE_ADJUST:
-        raise HTTPException(
-            status_code=400,
-            detail=f"크기 조정은 {MIN_SCALE_ADJUST:.0%}~{MAX_SCALE_ADJUST:.0%} 사이여야 합니다.",
-        )
-    before_bgr = _upload_to_bgr(await before.read(), "전")
-    after_bgr = _upload_to_bgr(await after.read(), "후")
+    for value in (scale_adjust, middle_scale_adjust):
+        if not MIN_SCALE_ADJUST <= value <= MAX_SCALE_ADJUST:
+            raise HTTPException(
+                status_code=400,
+                detail=f"크기 조정은 {MIN_SCALE_ADJUST:.0%}~{MAX_SCALE_ADJUST:.0%} 사이여야 합니다.",
+            )
+    uploads = {"before": before, "middle": middle, "after": after}
+    images = [_upload_to_bgr(await uploads[side].read(), SIDE_NAMES[side]) for side in side_keys]
+    scale_adjusts = [middle_scale_adjust, scale_adjust] if middle is not None else [scale_adjust]
 
     try:
-        result_before, result_after, warnings = await run_in_threadpool(
-            process_pair,
-            before_bgr,
-            after_bgr,
+        results, warnings = await run_in_threadpool(
+            process_photos,
+            images,
             mosaic,
             manual_points,
-            scale_adjust,
+            scale_adjusts,
             level,
             brightness_strength,
             tone_strength,
@@ -282,11 +298,9 @@ async def process(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     quality = PREVIEW_JPEG_QUALITY if preview else 92
-    return {
-        "before": _bgr_to_data_url(result_before, quality),
-        "after": _bgr_to_data_url(result_after, quality),
-        "warnings": warnings,
-    }
+    response: dict = {side: _bgr_to_data_url(image, quality) for side, image in zip(side_keys, results)}
+    response["warnings"] = warnings
+    return response
 
 
 @app.post("/api/mosaic", dependencies=[Depends(require_password)])
@@ -320,28 +334,33 @@ async def mosaic(
 
 
 @app.post("/api/suggest-points", dependencies=[Depends(require_password)])
-async def suggest_points(before: UploadFile = File(...), after: UploadFile = File(...)) -> dict:
-    """전/후 사진에서 정렬 기준점을 제안한다 (얼굴 검출이 실패했을 때의 출발점).
+async def suggest_points(
+    before: UploadFile = File(...),
+    after: UploadFile = File(...),
+    middle: UploadFile | None = File(None),
+) -> dict:
+    """전(·중간)·후 사진에서 정렬 기준점을 제안한다 (얼굴 검출이 실패했을 때의 출발점).
 
-    눈썹뿐 아니라 눈·코·귀까지 보이는 지점을 모두 찾아, 전/후 양쪽에 공통으로 있는 것만
+    눈썹뿐 아니라 눈·코·귀까지 보이는 지점을 모두 찾아, 모든 사진에 공통으로 있는 것만
     짝지어 돌려준다. 지점이 멀리 퍼질수록 배율·각도가 정확해진다.
 
     어디까지나 제안이라 실패해도 오류로 처리하지 않는다 — 화면은 빈 상태로 두고 사용자가
     직접 찍으면 된다. 그래서 available=false나 points=null도 정상 응답이다."""
+    side_keys = SET_SIDES if middle is not None else PAIR_SIDES
+    empty: dict = {side: None for side in side_keys} | {"labels": [], "level": False}
     if not suggest_available():
-        return {"available": False, "before": None, "after": None, "labels": [], "level": False}
+        return {"available": False} | empty
 
-    before_bytes = await before.read()
-    after_bytes = await after.read()
-    result = await run_in_threadpool(matched_points, before_bytes, after_bytes)
+    uploads = {"before": before, "middle": middle, "after": after}
+    images = [await uploads[side].read() for side in side_keys]
+    result = await run_in_threadpool(matched_points, images)
     if result is None:
-        return {"available": True, "before": None, "after": None, "labels": [], "level": False}
+        return {"available": True} | empty
 
-    before_points, after_points, labels = result
+    points_list, labels = result
     return {
         "available": True,
-        "before": before_points,
-        "after": after_points,
+        **dict(zip(side_keys, points_list)),
         "labels": labels,
         # 양쪽 눈썹이 다 잡혔을 때만 수평을 맞출 수 있다 (자세한 이유는 suggest.can_level).
         "level": can_level(labels),
@@ -349,13 +368,18 @@ async def suggest_points(before: UploadFile = File(...), after: UploadFile = Fil
 
 
 @app.post("/api/gif", dependencies=[Depends(require_password)])
-async def make_gif(before: UploadFile = File(...), after: UploadFile = File(...)) -> Response:
-    """전→후로 스르륵 넘어가는 GIF를 만든다.
+async def make_gif(
+    before: UploadFile = File(...),
+    after: UploadFile = File(...),
+    middle: UploadFile | None = File(None),
+) -> Response:
+    """전→(중간→)후로 스르륵 넘어가는 GIF를 만든다.
 
-    이미 변환이 끝난 두 장을 그대로 받는다. 원본을 다시 받아 정렬·보정을 다시 돌리면
+    이미 변환이 끝난 사진들을 그대로 받는다. 원본을 다시 받아 정렬·보정을 다시 돌리면
     시간이 오래 걸리고, 화면에 보이는 결과(모자이크 적용 여부 포함)와 달라질 수 있다."""
     images = []
-    for side, upload in (("전", before), ("후", after)):
+    ordered = [("전", before), ("중간", middle), ("후", after)]
+    for side, upload in [(side, upload) for side, upload in ordered if upload is not None]:
         # 정상이라면 이 앱이 만든 결과 JPEG가 온다. 그 밖의 것은 이유를 알려주고 거절한다.
         try:
             image = Image.open(BytesIO(await upload.read()))
@@ -369,9 +393,8 @@ async def make_gif(before: UploadFile = File(...), after: UploadFile = File(...)
                 detail=f"GIF를 만들 {side} 사진을 열 수 없습니다. 변환을 다시 해주세요.",
             ) from exc
         images.append(image)
-    before_image, after_image = images
 
-    gif_bytes = await run_in_threadpool(build_crossfade_gif, before_image, after_image)
+    gif_bytes = await run_in_threadpool(build_crossfade_gif, images)
     return Response(content=gif_bytes, media_type="image/gif")
 
 
