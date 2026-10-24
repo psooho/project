@@ -629,3 +629,34 @@
 @media (prefers-reduced-motion: reduce) {
   .progress-fill--working::after { animation: none; }
 }
+
+/* --- 여러 쌍 한 번에 ----------------------------------------------------- */
+/* 쌍마다 버튼·조절바가 따로 있어서, 어느 쌍의 것인지 헷갈리지 않게 카드로 묶는다. */
+.pair {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.pair-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.pair-title {
+  font-size: 1.05rem;
+  margin: 0;
+}
+
+.link-btn:disabled {
+  color: #9ca3af;
+  cursor: default;
+}
+
+.pair-bar {
+  flex-wrap: wrap;
+}

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
 import { BrushCanvas, EMPTY_STROKES, hasStrokes } from "./components/BrushCanvas";
 import type { BrushStroke, StrokeSides } from "./components/BrushCanvas";
@@ -254,7 +254,21 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-function App() {
+/** 한 화면에서 동시에 다룰 수 있는 전/후 사진 쌍의 수.
+ *  운영 서버는 인스턴스당 동시 처리가 2라(README 배포 참고) 셋째 요청은 다른 인스턴스로
+ *  가거나 잠깐 기다린다. 이보다 늘리면 기다리는 시간이 눈에 띄게 길어진다. */
+const MAX_PAIRS = 3;
+
+interface PairWorkspaceProps {
+  title: string;
+  /** 값이 바뀔 때마다 변환할 수 있는 상태면 변환을 시작한다 ("모두 변환" 버튼). */
+  transformSignal: number;
+  /** 지금 이 쌍을 변환할 수 있는지(전/후 사진이 다 있고 대기 중인지)를 위로 알린다. */
+  onReadyChange: (ready: boolean) => void;
+  onRemove?: () => void;
+}
+
+function PairWorkspace({ title, transformSignal, onReadyChange, onRemove }: PairWorkspaceProps) {
   const [beforePhoto, setBeforePhoto] = useState<File | null>(null);
   const [afterPhoto, setAfterPhoto] = useState<File | null>(null);
   const [status, setStatus] = useState<Status>("idle");
@@ -770,6 +784,21 @@ function App() {
   }
 
   const canTransform = Boolean(beforePhoto && afterPhoto) && status === "idle";
+
+  useEffect(() => {
+    onReadyChange(canTransform);
+  }, [canTransform, onReadyChange]);
+
+  // 처음 그릴 때의 값은 건너뛴다 — 새로 추가한 쌍이 바로 변환을 시작하면 안 된다.
+  const lastSignal = useRef(transformSignal);
+  useEffect(() => {
+    if (transformSignal === lastSignal.current) return;
+    lastSignal.current = transformSignal;
+    if (canTransform && !painting && !picking) void handleTransform();
+    // handleTransform은 매 렌더 새로 만들어지므로 신호가 바뀔 때만 반응하게 둔다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transformSignal]);
+
   const faceMissing = Boolean(displayed && isFaceMissing(displayed.results.warnings));
   // 찍은 순서가 전/후의 대응 관계라 개수가 같아야 한다.
   const pointsReady =
@@ -778,11 +807,20 @@ function App() {
     beforePoints.length >= 2 && afterPoints.length >= 2 && beforePoints.length !== afterPoints.length;
 
   return (
-    <div className="page">
-      <header className="page-header">
-        <h1>전후사진 변환</h1>
-        <p>전/후 사진을 넣고 변환한 뒤 다운로드하세요.</p>
-      </header>
+    <section className="pair">
+      <div className="pair-header">
+        <h2 className="pair-title">{title}</h2>
+        {onRemove && (
+          <button
+            type="button"
+            className="link-btn"
+            disabled={status === "processing" || adjustBusy || mosaicStatus === "processing"}
+            onClick={onRemove}
+          >
+            이 쌍 빼기
+          </button>
+        )}
+      </div>
 
       <section className="photo-grid">
         <PhotoDropzone
@@ -1141,6 +1179,84 @@ function App() {
           </>
         )}
         {error && <span className="error-note">{error}</span>}
+      </div>
+    </section>
+  );
+}
+
+function App() {
+  // 쌍마다 고유 번호를 준다. 중간 쌍을 빼도 나머지 쌍의 상태가 뒤섞이지 않게 key로 쓴다.
+  const nextId = useRef(2);
+  const [pairIds, setPairIds] = useState<number[]>([1]);
+  const [readyIds, setReadyIds] = useState<Set<number>>(new Set());
+  const [transformSignal, setTransformSignal] = useState(0);
+
+  const setReady = useCallback((id: number, ready: boolean) => {
+    setReadyIds((previous) => {
+      if (previous.has(id) === ready) return previous;
+      const next = new Set(previous);
+      if (ready) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
+  // 쌍마다 같은 함수를 계속 넘겨야 자식의 effect가 렌더마다 다시 돌지 않는다.
+  const readyHandlers = useRef(new Map<number, (ready: boolean) => void>());
+  function readyHandlerFor(id: number) {
+    let handler = readyHandlers.current.get(id);
+    if (!handler) {
+      handler = (ready: boolean) => setReady(id, ready);
+      readyHandlers.current.set(id, handler);
+    }
+    return handler;
+  }
+
+  function addPair() {
+    if (pairIds.length >= MAX_PAIRS) return;
+    setPairIds((ids) => [...ids, nextId.current++]);
+  }
+
+  function removePair(id: number) {
+    setPairIds((ids) => ids.filter((x) => x !== id));
+    setReady(id, false);
+    readyHandlers.current.delete(id);
+  }
+
+  const readyCount = pairIds.filter((id) => readyIds.has(id)).length;
+
+  return (
+    <div className="page">
+      <header className="page-header">
+        <h1>전후사진 변환</h1>
+        <p>전/후 사진을 넣고 변환한 뒤 다운로드하세요. 사진 쌍은 {MAX_PAIRS}개까지 한 번에 변환할 수 있습니다.</p>
+      </header>
+
+      {pairIds.map((id, index) => (
+        <PairWorkspace
+          key={id}
+          title={`${index + 1}번 사진`}
+          transformSignal={transformSignal}
+          onReadyChange={readyHandlerFor(id)}
+          onRemove={pairIds.length > 1 ? () => removePair(id) : undefined}
+        />
+      ))}
+
+      <div className="actions pair-bar">
+        {pairIds.length < MAX_PAIRS && (
+          <button type="button" className="submit-btn submit-btn--secondary" onClick={addPair}>
+            + 사진 쌍 추가 ({pairIds.length}/{MAX_PAIRS})
+          </button>
+        )}
+        {pairIds.length > 1 && (
+          <button
+            type="button"
+            className="submit-btn"
+            disabled={readyCount === 0}
+            onClick={() => setTransformSignal((n) => n + 1)}
+          >
+            {readyCount > 0 ? `${readyCount}쌍 모두 변환` : "모두 변환"}
+          </button>
+        )}
       </div>
     </div>
   );
